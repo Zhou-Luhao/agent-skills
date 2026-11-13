@@ -2,8 +2,6 @@
 
 [![Tests](https://github.com/Zhou-Luhao/agent-skills/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Zhou-Luhao/agent-skills/actions/workflows/tests.yml)
 
-A collection of reusable agent skills (SKILL.md) for Claude Code, ChatGPT, and other AI coding agents.
-
 Reusable [Agent Skills](https://agentskills.io) (`SKILL.md`) for Claude Code, ChatGPT, DeepSeek Harness and other AI coding agents.
 
 Docs are in Chinese; each skill's `README.md` states its output language.
