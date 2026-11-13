@@ -6,13 +6,15 @@ A collection of reusable agent skills (SKILL.md) for Claude Code, ChatGPT, and o
 
 Reusable [Agent Skills](https://agentskills.io) (`SKILL.md`) for Claude Code, ChatGPT, DeepSeek Harness and other AI coding agents.
 
+Docs are in Chinese; each skill's `README.md` states its output language.
+
 一个可复用的 AI agent 技能合集。每个技能是一个自包含目录：`SKILL.md` 负责触发与路由，`README.md` 面向人类读者，`references/` 存放按需加载的细节，`scripts/` 存放可执行逻辑。
 
 ## 技能目录
 
 | 技能 | 说明 | 依赖 |
 |---|---|---|
-| [`oura`](oura/README.md) | Oura Ring 数据查询与健康报告。拉取睡眠、准备度、活动、血氧、压力等全部 19 个接口端点，按维度 × 时间窗查询，生成日/周/月可视化报告（自包含 HTML + Markdown） | Python 3.9+ · 仅标准库 |
+| [`oura`](oura/README.md) | Oura Ring data query & health reports — all 19 API endpoints, day/week/month visual reports (self-contained HTML + Markdown). 拉取睡眠、准备度、活动、血氧、压力等全部 19 个端点，按维度 × 时间窗查询 | Python 3.9+ · stdlib only |
 
 ## 仓库结构
 

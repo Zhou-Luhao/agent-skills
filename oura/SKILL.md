@@ -1,6 +1,6 @@
 ---
 name: oura
-description: Use when the user asks about Oura Ring data — Oura 睡眠/睡眠分数、Oura 准备度 readiness、Oura 活动步数、Oura 血氧 SpO2 / 压力 / 恢复力 / 心血管年龄 / VO2max、Oura 心率或戒指电量，或要求生成 Oura 日报/周报/月报、导出 Oura 健康报告、检查 Oura 授权状态。
+description: Use when the user asks about Oura Ring data — 睡眠与睡眠分数 sleep score、准备度 readiness、活动与步数 activity / steps、血氧 SpO2 / blood oxygen、压力 stress、恢复力 resilience、心血管年龄 cardiovascular age、VO2 max、心率 heart rate、戒指电量 ring battery，或要求生成 Oura 日报/周报/月报 daily report / weekly report / monthly report、导出健康报告 export health report、检查授权状态 check authorization status。
 ---
 
 # Oura 全能助手

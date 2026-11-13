@@ -2,6 +2,13 @@
 
 Oura Ring 数据查询与健康报告技能。通过 Oura Cloud API v2 拉取戒指监测数据，支持按维度查询、按日/周/月生成可视化报告。
 
+> **English summary** — Query Oura Ring data via the Oura Cloud API v2 and generate visual health reports
+> for a day, a week or a month. Covers all 19 Oura collection endpoints. Pure Python 3.9+ (stdlib only),
+> OAuth2, offline self-contained HTML + Markdown output.
+>
+> **Report content is rendered in Chinese.** The rest of this README is in Chinese; the CLI documents
+> itself via `python3 scripts/oura.py --help`.
+
 - 触发方式见 [`SKILL.md`](SKILL.md)
 - 接口与字段口径见 [`references/api.md`](references/api.md)
 - 报告结构与交付契约见 [`references/reports.md`](references/reports.md)
