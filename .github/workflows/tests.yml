@@ -1,0 +1,90 @@
+name: Tests
+
+# 两个 job，都按"发现式"设计，新增技能无需改动本文件：
+#   unittest        发现 <skill>/scripts/tests/test_*.py，用标准库 unittest 逐个目录执行
+#   validate-skills 校验每个 <skill>/SKILL.md 的 YAML frontmatter（agentskills.io 规范）
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支的旧运行让位给新提交，避免排队
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    name: unittest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 技能声明 Python 3.9+，向上覆盖到当前最新稳定版
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 技能只依赖标准库，因此无需 pip install
+      - name: Run skill test suites
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          suites=0
+          for tests_dir in */scripts/tests; do
+            files=("$tests_dir"/test_*.py)
+            [ ${#files[@]} -gt 0 ] || continue
+
+            echo "::group::${tests_dir} (${#files[@]} file(s))"
+            # 在测试目录内执行 discovery：测试文件靠自身插入 sys.path，
+            # 用 discover 导入模块才能收集到全部用例（直接跑单文件会漏）。
+            ( cd "$tests_dir" && python -m unittest discover -v )
+            echo "::endgroup::"
+
+            suites=$((suites + 1))
+          done
+
+          if [ "$suites" -eq 0 ]; then
+            msg="未发现 <skill>/scripts/tests/test_*.py，本次没有测试可跑。"
+            echo "::warning title=No tests discovered::${msg}"
+            {
+              echo "### :warning: ${msg}"
+              echo
+              echo '新增 `<skill>/scripts/tests/test_*.py` 后，本工作流会自动收集执行。'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "共执行 ${suites} 个测试目录。" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  validate-skills:
+    name: Validate SKILL.md frontmatter
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # 校验器只用于 CI，不属于技能运行时，因此可以依赖 PyYAML
+      - name: Install PyYAML
+        run: python -m pip install --disable-pip-version-check --quiet pyyaml
+
+      - name: Validate skill frontmatter
+        run: python .github/scripts/validate_skills.py
