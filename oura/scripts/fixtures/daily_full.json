@@ -1,0 +1,112 @@
+{
+  "daily_sleep": [
+    {"id": "ds-2026-11-10", "day": "2026-11-10", "score": 82,
+     "contributors": {"deep_sleep": 90, "efficiency": 88, "latency": 95,
+                      "rem_sleep": 70, "restfulness": 80, "timing": 85,
+                      "total_sleep": 74}}
+  ],
+  "daily_readiness": [
+    {"id": "dr-2026-11-10", "day": "2026-11-10", "score": 77,
+     "temperature_deviation": 0.12, "temperature_trend_deviation": -0.05,
+     "contributors": {"activity_balance": 70, "body_temperature": 88,
+                      "hrv_balance": 65, "previous_day_activity": 80,
+                      "previous_night": 75, "recovery_index": 72,
+                      "resting_heart_rate": 68, "sleep_balance": 77,
+                      "sleep_regularity": 81}}
+  ],
+  "daily_activity": [
+    {"id": "da-2026-11-10", "day": "2026-11-10", "score": 90, "steps": 8432,
+     "active_calories": 412, "total_calories": 2210, "target_calories": 400,
+     "high_activity_time": 1200, "medium_activity_time": 2400,
+     "low_activity_time": 5400, "sedentary_time": 21600, "non_wear_time": 0,
+     "inactivity_alerts": 1, "equivalent_walking_distance": 6120,
+     "contributors": {"meet_daily_targets": 85, "move_every_hour": 90,
+                      "recovery_time": 78, "stay_active": 88,
+                      "training_frequency": 75, "training_volume": 80}}
+  ],
+  "daily_spo2": [
+    {"id": "sp-2026-11-10", "day": "2026-11-10",
+     "spo2_percentage": {"average": 96.4}, "breathing_disturbance_index": 2.1}
+  ],
+  "daily_stress": [
+    {"id": "st-2026-11-10", "day": "2026-11-10", "day_summary": "normal",
+     "stress_high": 5400, "recovery_high": 7200}
+  ],
+  "daily_resilience": [
+    {"id": "rs-2026-11-10", "day": "2026-11-10", "level": "solid",
+     "contributors": {"sleep_recovery": 80, "daytime_recovery": 72,
+                      "stress": 65}}
+  ],
+  "daily_cardiovascular_age": [
+    {"id": "cv-2026-11-10", "day": "2026-11-10", "vascular_age": 31,
+     "pulse_wave_velocity": 6.4}
+  ],
+  "vO2_max": [
+    {"id": "vo2-2026-11-10", "day": "2026-11-10", "vo2_max": 47.2}
+  ],
+  "sleep_time": [
+    {"id": "slt-2026-11-10", "day": "2026-11-10", "status": "ideal",
+     "recommendation": "improve", "optimal_bedtime": {"start_offset": 1380,
+     "end_offset": 1500, "day_tz": 0}}
+  ],
+  "sleep": [
+    {"id": "sl-main", "day": "2026-11-10", "type": "long_sleep",
+     "bedtime_start": "2026-11-09T23:10:00.000+08:00",
+     "bedtime_end": "2026-11-10T07:20:00.000+08:00",
+     "total_sleep_duration": 25200, "time_in_bed": 28200, "awake_time": 1800,
+     "deep_sleep_duration": 5400, "light_sleep_duration": 14400,
+     "rem_sleep_duration": 5400, "latency": 600, "efficiency": 89,
+     "average_hrv": 48, "average_heart_rate": 54, "lowest_heart_rate": 47,
+     "average_breath": 14.2, "sleep_phase_5_min": "4411222331",
+     "readiness_score_delta": 3, "sleep_score_delta": -1},
+    {"id": "sl-nap", "day": "2026-11-10", "type": "sleep",
+     "bedtime_start": "2026-11-10T13:00:00.000+08:00",
+     "bedtime_end": "2026-11-10T13:20:00.000+08:00",
+     "total_sleep_duration": 900, "time_in_bed": 1200, "awake_time": 300,
+     "deep_sleep_duration": 0, "light_sleep_duration": 900,
+     "rem_sleep_duration": 0, "latency": 120, "efficiency": 75,
+     "average_hrv": 55, "average_heart_rate": 58, "lowest_heart_rate": 52,
+     "average_breath": 15.0, "sleep_phase_5_min": "2222"}
+  ],
+  "workout": [
+    {"id": "wo-1", "day": "2026-11-10", "activity": "running", "label": "晨跑",
+     "intensity": "moderate", "calories": 320, "distance": 5200.0,
+     "start_datetime": "2026-11-10T06:30:00.000+08:00",
+     "end_datetime": "2026-11-10T07:05:00.000+08:00", "source": "autodetected"}
+  ],
+  "session": [
+    {"id": "se-1", "day": "2026-11-10", "type": "meditation", "mood": "good",
+     "start_datetime": "2026-11-10T21:00:00.000+08:00",
+     "end_datetime": "2026-11-10T21:15:00.000+08:00",
+     "heart_rate": 62, "heart_rate_variability": 58, "motion_count": 3}
+  ],
+  "tag": [
+    {"id": "tg-1", "day": "2026-11-10", "text": "喝了咖啡",
+     "timestamp": "2026-11-10T09:00:00.000+08:00", "tags": ["caffeine"]}
+  ],
+  "enhanced_tag": [],
+  "rest_mode_period": [
+    {"id": "rm-1", "start_day": "2026-11-10", "end_day": "2026-11-10",
+     "start_time": "2026-11-10T12:00:00.000+08:00",
+     "end_time": "2026-11-10T14:00:00.000+08:00", "episodes": []}
+  ],
+  "heartrate": [
+    {"timestamp": "2026-11-10T00:10:00.000Z", "timestamp_unix": 1762733400,
+     "bpm": 52, "source": "awake"},
+    {"timestamp": "2026-11-10T00:15:00.000Z", "timestamp_unix": 1762733700,
+     "bpm": 61, "source": "awake"}
+  ],
+  "ring_battery_level": [
+    {"timestamp": "2026-11-10T00:00:00.000Z", "timestamp_unix": 1762732800,
+     "level": 82, "charging": false, "in_charger": false},
+    {"timestamp": "2026-11-10T08:00:00.000Z", "timestamp_unix": 1762761600,
+     "level": 76, "charging": false, "in_charger": false}
+  ],
+  "ring_configuration": [
+    {"id": "ring-1", "design": "heritage", "color": "silver",
+     "hardware_type": "gen3", "size": 10, "firmware_version": "2.9.1"}
+  ],
+  "personal_info": [
+    {"id": "u1", "age": 30, "email": "luhao@example.com", "biological_sex": "male"}
+  ]
+}
