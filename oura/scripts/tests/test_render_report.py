@@ -73,7 +73,7 @@ class HtmlTest(unittest.TestCase):
 
     def test_pii_never_rendered(self):
         html = render.render_html(_daily())
-        self.assertNotIn("luhao@example.com", html)
+        self.assertNotIn("agent@example.com", html)
         self.assertNotIn("biological_sex", html)
 
     def test_seconds_rendered_as_hours_minutes(self):
@@ -195,7 +195,7 @@ class CredentialScanTest(unittest.TestCase):
             md = render.render_markdown(report)
         for blob in (html, md):
             self.assertNotIn(self.SECRET, blob)
-            self.assertNotIn("luhao@example.com", blob)
+            self.assertNotIn("agent@example.com", blob)
             self.assertNotIn("biological_sex", blob)
 
 

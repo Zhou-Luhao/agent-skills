@@ -107,6 +107,6 @@
      "hardware_type": "gen3", "size": 10, "firmware_version": "2.9.1"}
   ],
   "personal_info": [
-    {"id": "u1", "age": 30, "email": "luhao@example.com", "biological_sex": "male"}
+    {"id": "u1", "age": 30, "email": "agent@example.com", "biological_sex": "male"}
   ]
 }
