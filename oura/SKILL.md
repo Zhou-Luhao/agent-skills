@@ -1,5 +1,7 @@
 ---
 name: oura
+license: MIT
+compatibility: Requires Python 3.9+ (stdlib only, no third-party packages), outbound HTTPS to api.ouraring.com, and a browser for the one-time OAuth2 authorization; token cache lives in ~/.config/oura-skill/.
 description: Use when the user asks about Oura Ring data — 睡眠与睡眠分数 sleep score、准备度 readiness、活动与步数 activity / steps、血氧 SpO2 / blood oxygen、压力 stress、恢复力 resilience、心血管年龄 cardiovascular age、VO2 max、心率 heart rate、戒指电量 ring battery，或要求生成 Oura 日报/周报/月报 daily report / weekly report / monthly report、导出健康报告 export health report、检查授权状态 check authorization status。
 ---
 
