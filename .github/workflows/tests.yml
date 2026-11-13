@@ -21,7 +21,9 @@ concurrency:
 jobs:
   unittest:
     name: unittest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # 固定 24.04 而非 ubuntu-latest：后者正在切到 26.04，而 Python 3.9 只有
+    # 22.04/24.04 的预编译包，落在 26.04 上会在 setup-python 阶段直接失败。
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -71,7 +73,7 @@ jobs:
 
   validate-skills:
     name: Validate SKILL.md frontmatter
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout
