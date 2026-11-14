@@ -10,6 +10,10 @@
   - allowed-tools 可选，空格分隔的字符串
 frontmatter 之后必须有正文。
 
+另做一次交叉校验：`.github/workflows/` 里所有 `python-version` 矩阵项的最低
+版本，不得高于 `compatibility` 声明的 Python 下限。否则文档声称支持的版本
+实际没被 CI 跑过——例如从矩阵里删掉 3.9 却忘了改 `compatibility`。
+
 用法：python .github/scripts/validate_skills.py
 退出码：0 = 通过（含"没有技能"的情况），1 = 有错误，2 = 环境问题。
 """
@@ -33,6 +37,104 @@ NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 NAME_MAX = 64
 DESC_MAX = 1024
 COMPAT_MAX = 500
+
+# `compatibility` 里常见的写法：Requires Python 3.9+ / Requires Python 3.14
+PY_FLOOR_RE = re.compile(r"Python\s+(\d+)\.(\d+)")
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+
+
+def version_of(text: str) -> tuple[int, int] | None:
+    """从 "3.9" / "3.10.4" 取出 (major, minor)；无法解析返回 None。"""
+    match = re.match(r"\s*(\d+)\.(\d+)", text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def fmt_version(version: tuple[int, int]) -> str:
+    return f"{version[0]}.{version[1]}"
+
+
+def collect_ci_python_floor() -> tuple[tuple[int, int] | None, str]:
+    """扫描 workflow 里所有 `python-version` 矩阵项，取其中最低的版本。
+
+    返回 ((major, minor), 来源文件列表)；仓库里没有该矩阵时返回 (None, "")。
+    按"发现式"处理：新增或重命名 workflow 都无需改本脚本。
+    """
+    if not WORKFLOWS_DIR.is_dir():
+        return None, ""
+
+    found: list[tuple[tuple[int, int], str]] = []
+
+    for path in sorted(WORKFLOWS_DIR.glob("*.y*ml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        versions: list[tuple[int, int]] = []
+        for job in (data.get("jobs") or {}).values():
+            if not isinstance(job, dict):
+                continue
+            strategy = job.get("strategy")
+            if not isinstance(strategy, dict):
+                continue
+            matrix = strategy.get("matrix")
+            if not isinstance(matrix, dict):
+                continue
+            entries = matrix.get("python-version")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                version = version_of(str(entry))
+                if version:
+                    versions.append(version)
+
+        if versions:
+            found.append((min(versions), path.relative_to(ROOT).as_posix()))
+
+    if not found:
+        return None, ""
+    return min(version for version, _ in found), ", ".join(source for _, source in found)
+
+
+def check_python_floor(
+    compat: str, text: str, ci_floor: tuple[int, int] | None, ci_source: str
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """compatibility 声明的 Python 下限必须被 CI 矩阵覆盖。
+
+    - 声明的下限低于矩阵最低版本 → 错误：声称支持的版本从未被测试
+    - 声明的下限高于矩阵最低版本 → 警告：多测了无需支持的版本
+    """
+    if ci_floor is None:
+        return [], []
+
+    match = PY_FLOOR_RE.search(compat)
+    if not match:
+        return [], []
+
+    declared = (int(match.group(1)), int(match.group(2)))
+    line = key_line(text, "compatibility")
+
+    if declared < ci_floor:
+        return [(
+            f"`compatibility` 声明 Python {fmt_version(declared)}+，但 CI 矩阵最低只跑到"
+            f" {fmt_version(ci_floor)}（{ci_source}），声明的最低版本实际没有被测试。"
+            f"请把 {fmt_version(declared)} 加回矩阵，或上调声明下限。",
+            line,
+        )], []
+
+    if ci_floor < declared:
+        return [], [(
+            f"`compatibility` 声明 Python {fmt_version(declared)}+，而 CI 矩阵从"
+            f" {fmt_version(ci_floor)} 起测（{ci_source}）；若无需支持更老版本，"
+            f"可从矩阵移除，否则建议下调声明下限。",
+            line,
+        )]
+
+    return [], []
 
 
 def parse_frontmatter(text: str) -> tuple[str, int]:
@@ -89,25 +191,29 @@ def check_types(data: dict, text: str) -> list[tuple[str, int]]:
     return errors
 
 
-def validate_skill(skill_dir: Path) -> list[tuple[str, int]]:
+def validate_skill(
+    skill_dir: Path, ci_floor: tuple[int, int] | None = None, ci_source: str = ""
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    """返回 (errors, warnings)，两者都是 [(消息, 行号)]。"""
     skill_md = skill_dir / "SKILL.md"
     text = skill_md.read_text(encoding="utf-8")
 
     try:
         block, body_start = parse_frontmatter(text)
     except ValueError as exc:
-        return [(str(exc), 1)]
+        return [(str(exc), 1)], []
 
     errors: list[tuple[str, int]] = []
+    warnings: list[tuple[str, int]] = []
 
     try:
         data = yaml.safe_load(block)
     except yaml.YAMLError as exc:
         detail = " ".join(str(exc).split())
-        return [(f"frontmatter 不是合法 YAML：{detail}", 1)]
+        return [(f"frontmatter 不是合法 YAML：{detail}", 1)], []
 
     if not isinstance(data, dict):
-        return [("frontmatter 必须是键值映射", 1)]
+        return [("frontmatter 必须是键值映射", 1)], []
 
     name = data.get("name")
     if name is None:
@@ -140,11 +246,17 @@ def validate_skill(skill_dir: Path) -> list[tuple[str, int]]:
 
     errors.extend(check_types(data, text))
 
+    compat = data.get("compatibility")
+    if isinstance(compat, str):
+        floor_errors, floor_warnings = check_python_floor(compat, text, ci_floor, ci_source)
+        errors.extend(floor_errors)
+        warnings.extend(floor_warnings)
+
     line_count = len(text.splitlines())
     if body_start > line_count:
         errors.append(("frontmatter 之后缺少正文内容", max(1, line_count)))
 
-    return errors
+    return errors, warnings
 
 
 def main() -> int:
@@ -156,14 +268,20 @@ def main() -> int:
     total_errors = 0
     rows: list[str] = []
     warnings: list[str] = []
+    notes: list[str] = []
+
+    ci_floor, ci_source = collect_ci_python_floor()
 
     for skill_dir in skill_dirs:
         rel = skill_dir.relative_to(ROOT).as_posix()
-        errors = validate_skill(skill_dir)
+        errors, skill_notes = validate_skill(skill_dir, ci_floor, ci_source)
         total_errors += len(errors)
 
         for message, line in errors:
             print(f"::error file={rel}/SKILL.md,line={line}::[{rel}] {message}")
+        for message, line in skill_notes:
+            print(f"::warning file={rel}/SKILL.md,line={line}::[{rel}] {message}")
+            notes.append(f"`{rel}`：{message}")
 
         if not (skill_dir / "README.md").is_file():
             warnings.append(rel)
@@ -179,6 +297,8 @@ def main() -> int:
         print(f"::warning title=No skills discovered::{message}")
     else:
         print(f"\n检查了 {len(skill_dirs)} 个技能，{total_errors} 个错误。")
+        if ci_floor is not None:
+            print(f"CI 矩阵最低 Python：{fmt_version(ci_floor)}（{ci_source}）")
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
@@ -189,6 +309,10 @@ def main() -> int:
             lines += [f"> ⚠️ {message}", ""]
         if warnings:
             lines += [f"> ⚠️ 缺少 README.md：{', '.join(f'`{w}`' for w in warnings)}", ""]
+        if notes:
+            lines += ["#### 提示", "", *[f"- {note}" for note in notes], ""]
+        if ci_floor is not None:
+            lines += [f"CI 矩阵最低 Python：`{fmt_version(ci_floor)}`（{ci_source}）", ""]
         with open(summary_path, "a", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
 
