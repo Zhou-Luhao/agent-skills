@@ -93,7 +93,12 @@ def collect_ci_python_floor() -> tuple[tuple[int, int] | None, str]:
                     versions.append(version)
 
         if versions:
-            found.append((min(versions), path.relative_to(ROOT).as_posix()))
+            try:
+                source = path.relative_to(ROOT).as_posix()
+            except ValueError:
+                # 测试会把 WORKFLOWS_DIR 指到临时目录，此时无法相对仓库根取名
+                source = path.as_posix()
+            found.append((min(versions), source))
 
     if not found:
         return None, ""
