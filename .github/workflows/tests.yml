@@ -5,9 +5,13 @@ name: Tests
 #   validate-skills 校验每个 <skill>/SKILL.md 的 YAML frontmatter（agentskills.io 规范）
 
 on:
+  # push 只跑 main：合并后的主干验证。
+  # 分支推送交给 pull_request，否则同一个 SHA 会同时触发两轮，
+  # 每个 PR 的 job 数直接翻倍。
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+  # 允许在 Actions 页面手动重跑
   workflow_dispatch:
 
 permissions:
