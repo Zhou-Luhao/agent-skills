@@ -94,6 +94,9 @@ class AddFlowTestBase(unittest.TestCase):
         self.categories = [
             category("recC1", "支出·餐饮·午餐", "支出"),
             category("recC2", "收入·工资", "收入"),
+            # 用户可自建无前缀分类：方向只能看「类型」，不能猜名字或金额符号。
+            category("recC3", "咖啡", "支出"),
+            {"record_id": "recC4", "fields": {"分类": "待定"}},
         ]
         self.entry_rows = []
         self.calls = []  # ("create", table_id) / ("update", table_id, record_ids)
@@ -190,9 +193,10 @@ class AddFlowTestBase(unittest.TestCase):
 
 class ResolveCategoryTest(AddFlowTestBase):
     def test_category_resolved_live(self):
-        # 两次解析必须两次搜表：分类在表里随时可改，不能缓存。
+        # 每次解析都重新搜表：表里改了分类名，下一次解析立刻看到。
         first = add_flow.resolve_category(self.cfg, "支出·餐饮·午餐")
-        second = add_flow.resolve_category(self.cfg, "支出·餐饮·午餐")
+        self.categories[0]["fields"]["分类"] = "支出·餐饮·晚餐"
+        second = add_flow.resolve_category(self.cfg, "支出·餐饮·晚餐")
 
         self.assertEqual(first, "recC1")
         self.assertEqual(second, "recC1")
@@ -219,9 +223,10 @@ class ExecuteTest(AddFlowTestBase):
     def test_write_order_details_first(self):
         result = add_flow.execute(self.cfg, self.entry())
 
-        self.assertEqual(self.calls[0][0], "create")
-        self.assertEqual(self.calls[0][1], "tbl_entry")
-        self.assertEqual([call[0] for call in self.calls[1:]], ["update"])
+        self.assertEqual(
+            [(call[0], call[1]) for call in self.calls],
+            [("create", "tbl_entry"), ("update", "tbl_account")],
+        )
         self.assertEqual(result["created"], ["recNew1"])
         self.assertEqual(result["updated"], 1)
 
@@ -289,6 +294,9 @@ class ExecuteTest(AddFlowTestBase):
         self.assertEqual(len(exc.completed), 1)
         self.assertIn("收支明细", exc.completed[0])
         self.assertTrue(exc.unfinished)
+        # 精确指出可能已落库的明细和失败步骤，CLI 才能给出可核对的信息。
+        self.assertEqual(exc.created_ids, ["recNew1"])
+        self.assertIn("更新「账户」recA1", exc.failed_step)
         self.assertIn("已完成", str(exc))
         self.assertIn("未完成", str(exc))
         # 明细先落库：失败时它已经存在，不能被报告成“什么都没发生”。
@@ -302,6 +310,8 @@ class ExecuteTest(AddFlowTestBase):
             add_flow.execute(self.cfg, self.entry())
 
         self.assertEqual(caught.exception.completed, [])
+        self.assertEqual(caught.exception.created_ids, [])
+        self.assertIn("创建「收支明细」", caught.exception.failed_step)
         self.assertFalse(self.update_records.called)
         self.assertEqual(self.entry_rows, [])
 
@@ -319,6 +329,35 @@ class ExecuteTest(AddFlowTestBase):
 
         self.assertFalse(self.create_records.called)
         self.assertFalse(self.update_records.called)
+
+    def test_expense_with_income_category_raises(self):
+        with self.assertRaises(posting.PostingError) as caught:
+            add_flow.execute(self.cfg, self.entry(category="收入·工资"))
+
+        message = str(caught.exception)
+        self.assertIn("收入·工资", message)
+        self.assertIn("收入", message)
+        self.assertFalse(self.create_records.called)
+        self.assertFalse(self.update_records.called)
+
+    def test_income_with_expense_category_raises(self):
+        with self.assertRaises(posting.PostingError) as caught:
+            add_flow.execute(
+                self.cfg,
+                self.entry(kind="income", amount=5000, category="支出·餐饮·午餐"),
+            )
+
+        self.assertIn("支出·餐饮·午餐", str(caught.exception))
+        self.assertFalse(self.create_records.called)
+        self.assertFalse(self.update_records.called)
+
+    def test_explicit_kind_category_without_type_raises(self):
+        with self.assertRaises(posting.PostingError) as caught:
+            add_flow.execute(self.cfg, self.entry(category="待定"))
+
+        self.assertIn("待定", str(caught.exception))
+        self.assertIn("类型", str(caught.exception))
+        self.assertFalse(self.create_records.called)
 
     def test_irrelevant_fields_rejected(self):
         with self.assertRaises(posting.PostingError):
@@ -340,20 +379,23 @@ class ExecuteTest(AddFlowTestBase):
         self.assertFalse(self.create_records.called)
 
     def test_hooks_run_in_order_after_writes(self):
-        order = []
-        self.quotes.side_effect = lambda cfg, now=None: order.append(
+        # 钩子写进同一个调用日志，才能证明“先写入、后钩子”而不是只证明钩子顺序。
+        self.quotes.side_effect = lambda cfg, now=None: self.calls.append(
             ("quotes", cfg, now)
         )
-        self.snapshot.side_effect = lambda cfg, now=None: order.append(
+        self.snapshot.side_effect = lambda cfg, now=None: self.calls.append(
             ("snapshot", cfg, now)
         )
 
         add_flow.execute(self.cfg, self.entry(), now=FIXED_INSTANT)
 
-        self.assertEqual([item[0] for item in order], ["quotes", "snapshot"])
-        self.assertIs(order[0][1], self.cfg)
-        self.assertEqual(order[0][2], FIXED_INSTANT)
-        self.assertEqual(order[1][2], FIXED_INSTANT)
+        self.assertEqual(
+            [call[0] for call in self.calls],
+            ["create", "update", "quotes", "snapshot"],
+        )
+        self.assertIs(self.calls[2][1], self.cfg)
+        self.assertEqual(self.calls[2][2], FIXED_INSTANT)
+        self.assertEqual(self.calls[3][2], FIXED_INSTANT)
 
     def test_hook_failure_never_fails_add(self):
         self.quotes.side_effect = RuntimeError("行情源不可用")
@@ -408,6 +450,9 @@ class LedgerCliAddTest(AddFlowTestBase):
             )
 
         self.assertEqual(code, 2)
+        self.assertIn("--account", err.getvalue())
+        # argparse 在 _run_add 之前就退出：不读配置、不查表、不写任何东西。
+        self.assertEqual(self.search_calls, [])
         self.assertFalse(self.create_records.called)
 
     def test_cli_default_date_today_utc8(self):
@@ -480,10 +525,12 @@ class LedgerCliAddTest(AddFlowTestBase):
         report = err.getvalue()
         self.assertIn("已完成", report)
         self.assertIn("未完成", report)
-        self.assertIn("收支明细", report)
+        self.assertIn("失败步骤：更新「账户」recA1", report)
+        self.assertIn("可能已写入的明细：recNew1", report)
         self.assertEqual(len(self.entry_rows), 1)
 
-    def test_cli_auto_uses_category_prefix(self):
+    def test_cli_auto_prefixless_expense_category(self):
+        # 回归：用户自建的无前缀「支出」分类 + 正数金额，必须记支出、账户减少。
         with captured_output() as (out, err):
             code = ledger.main(
                 [
@@ -493,15 +540,67 @@ class LedgerCliAddTest(AddFlowTestBase):
                     "--account",
                     "现金",
                     "--category",
-                    "支出·餐饮·午餐",
+                    "咖啡",
                 ]
             )
 
         self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
         self.assertEqual(self.entry_fields()["类型"], ["支出"])
+        self.assertEqual(self.entry_fields()["分类"], [{"id": "recC3"}])
         self.assertEqual(self.account_balance("recA1"), 965.0)
 
-    def test_cli_auto_negative_amount_is_expense(self):
+    def test_cli_auto_income_category(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--amount",
+                    "5000",
+                    "--account",
+                    "现金",
+                    "--category",
+                    "收入·工资",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(self.entry_fields()["类型"], ["收入"])
+        self.assertEqual(self.entry_fields()["分类"], [{"id": "recC2"}])
+        self.assertEqual(self.account_balance("recA1"), 6000.0)
+
+    def test_cli_auto_category_without_type_exit_2(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--amount",
+                    "35",
+                    "--account",
+                    "现金",
+                    "--category",
+                    "待定",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("方向不明确", err.getvalue())
+        self.assertIn("--kind income|expense", err.getvalue())
+        self.assertFalse(self.create_records.called)
+
+    def test_cli_auto_without_category_exit_2(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                ["add", "--amount", "35", "--account", "现金"]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("方向不明确", err.getvalue())
+        self.assertEqual(self.search_calls, [])
+        self.assertFalse(self.create_records.called)
+
+    def test_cli_auto_does_not_use_amount_sign(self):
+        # 负金额不能把支出分类翻成收入：方向只看分类类型，金额本身不合法。
         with captured_output() as (out, err):
             code = ledger.main(
                 [
@@ -510,13 +609,13 @@ class LedgerCliAddTest(AddFlowTestBase):
                     "--account",
                     "现金",
                     "--category",
-                    "支出·餐饮·午餐",
+                    "咖啡",
                 ]
             )
 
-        self.assertEqual(code, 0)
-        self.assertEqual(self.entry_fields()["金额"], 35.0)
-        self.assertEqual(self.entry_fields()["类型"], ["支出"])
+        self.assertEqual(code, 2)
+        self.assertEqual(self.entry_rows, [])
+        self.assertFalse(self.create_records.called)
 
     def test_cli_auto_with_to_account_is_transfer(self):
         with captured_output() as (out, err):
@@ -537,11 +636,33 @@ class LedgerCliAddTest(AddFlowTestBase):
         self.assertEqual(self.account_balance("recA1"), 900.0)
         self.assertEqual(self.account_balance("recA2"), 1100.0)
 
+    def test_cli_explicit_kind_mismatched_category_exit_2(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--kind",
+                    "expense",
+                    "--amount",
+                    "35",
+                    "--account",
+                    "现金",
+                    "--category",
+                    "收入·工资",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("收入·工资", err.getvalue())
+        self.assertFalse(self.create_records.called)
+
     def test_cli_unknown_account_exit_5(self):
         with captured_output() as (out, err):
             code = ledger.main(
                 [
                     "add",
+                    "--kind",
+                    "expense",
                     "--amount",
                     "35",
                     "--account",

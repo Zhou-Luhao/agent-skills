@@ -179,8 +179,8 @@ def _add_add_parser(subparsers) -> None:
         choices=("auto",) + posting.SUPPORTED_KINDS,
         default="auto",
         help=(
-            "记账类型（默认 auto：有 --to-account 即转账；分类以 支出· 开头"
-            "或金额为负即支出；否则收入）"
+            "记账类型（默认 auto：有 --to-account 即转账；否则按 --category"
+            " 在分类表的「类型」判断收支，类型缺失时必须显式指定）"
         ),
     )
     add.add_argument(
@@ -192,7 +192,7 @@ def _add_add_parser(subparsers) -> None:
         "--amount",
         required=True,
         type=float,
-        help="金额，恒正；auto 模式下负数按支出处理（取绝对值）",
+        help="金额必须大于 0（方向由 --kind 或分类类型决定，不看金额符号）",
     )
     add.add_argument("--account", required=True, help="账户名称或 record_id")
     add.add_argument(
@@ -249,25 +249,30 @@ def _usage_error(message: str) -> int:
     return EXIT_USAGE
 
 
-def _auto_kind(args: argparse.Namespace) -> str:
-    """--kind auto 的规则：转账看 --to-account，收支看分类前缀 / 金额符号。"""
-    if args.to_account is not None:
-        return "transfer"
-    category = (args.category or "").strip()
-    if category.startswith("支出·"):
-        return "expense"
-    if category.startswith("收入·"):
-        return "income"
-    return "expense" if args.amount < 0 else "income"
+_AUTO_AMBIGUOUS = "方向不明确，请用 --kind income|expense 指定"
 
 
 def _run_add(args: argparse.Namespace) -> int:
-    auto = args.kind == "auto"
-    kind = _auto_kind(args) if auto else args.kind
-    amount = args.amount
-    # auto 用金额符号表达“支出”，落库金额仍恒正。
-    if auto and kind == "expense" and amount < 0:
-        amount = -amount
+    cfg = None
+    if args.kind == "auto":
+        # auto 只看 --to-account 与分类表的「类型」，绝不用金额正负猜方向。
+        if args.to_account is not None:
+            kind = "transfer"
+        elif args.category is None:
+            return _usage_error(
+                _AUTO_AMBIGUOUS
+                + "（--kind auto 需要 --category 才能按分类类型判断方向）"
+            )
+        else:
+            cfg = config.load_config()
+            kind = add_flow.category_kind(cfg, args.category)
+            if kind is None:
+                return _usage_error(
+                    _AUTO_AMBIGUOUS
+                    + "（分类「%s」的「类型」缺失或不可用）" % args.category
+                )
+    else:
+        kind = args.kind
 
     if kind == "transfer":
         if args.to_account is None:
@@ -291,7 +296,7 @@ def _run_add(args: argparse.Namespace) -> int:
     entry = {
         "kind": kind,
         "date": args.date or add_flow.today_utc8(),
-        "amount": amount,
+        "amount": args.amount,
         "account": args.account,
         "summary": args.summary or "",
         "note": args.note or "",
@@ -301,13 +306,14 @@ def _run_add(args: argparse.Namespace) -> int:
     else:
         entry["category"] = args.category
 
-    cfg = config.load_config()
+    if cfg is None:
+        cfg = config.load_config()
     result = add_flow.execute(cfg, entry)
     print(
         "已记账：%s %.2f 元 · 账户 %s（日期 %s，明细 %s，更新 %d 项）"
         % (
             posting.KIND_LABELS[kind],
-            amount,
+            args.amount,
             args.account,
             entry["date"],
             "、".join(result["created"]) or "无",
@@ -566,6 +572,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return EXIT_USAGE
     except add_flow.PartialWriteError as exc:
         print("记账部分失败：%s" % exc, file=sys.stderr)
+        print("失败步骤：%s" % (exc.failed_step or "未知"), file=sys.stderr)
+        if exc.created_ids:
+            print(
+                "可能已写入的明细：%s（请到飞书表格核对该行）"
+                % "、".join(exc.created_ids),
+                file=sys.stderr,
+            )
         print(
             "已完成：%s" % ("、".join(exc.completed) or "无"),
             file=sys.stderr,

@@ -43,10 +43,15 @@ class PartialWriteError(RuntimeError):
         completed: List[str],
         unfinished: List[str],
         cause: BaseException,
+        created_ids: Optional[List[str]] = None,
+        failed_step: Optional[str] = None,
     ) -> None:
         self.completed = list(completed)
         self.unfinished = list(unfinished)
         self.cause = cause
+        # 已落库的明细 record_id：部分失败时 CLI 要能指出哪一行可能已存在。
+        self.created_ids = list(created_ids or [])
+        self.failed_step = failed_step
         # 语义化别名：调用方不必猜属性名。
         self.completed_steps = self.completed
         self.pending = self.unfinished
@@ -123,8 +128,17 @@ def _cell_text(value: Any) -> str:
     return ""
 
 
-def resolve_category(cfg: dict, full_name: str) -> str:
-    """按主字段全名实时解析分类 record_id；不存在就报错，绝不自动创建。
+def _category_type(record: dict) -> Optional[str]:
+    """分类记录的「类型」单元格 → "收入"/"支出"；缺失或不可用返回 None。"""
+    fields = record.get("fields") if isinstance(record, dict) else None
+    if not isinstance(fields, dict):
+        return None
+    text = _cell_text(fields.get("类型")).strip()
+    return text if text in ("收入", "支出") else None
+
+
+def _resolve_category_record(cfg: dict, full_name: str) -> dict:
+    """按主字段全名实时解析分类记录；不存在/重名都抛 PostingError。
 
     分类表由用户随时增删，所以不做缓存；每次记账都重新查表。
     """
@@ -155,12 +169,46 @@ def resolve_category(cfg: dict, full_name: str) -> str:
             "分类「%s」匹配到 %d 条记录（%s），存在歧义；"
             "请先在「分类」表消除重名" % (target, len(matches), record_ids)
         )
-    record_id = matches[0].get("record_id")
+    record = matches[0]
+    record_id = record.get("record_id")
     if not isinstance(record_id, str) or not record_id:
         raise posting.PostingError(
             "分类「%s」的 record_id 异常：%r" % (target, record_id)
         )
-    return record_id
+    return record
+
+
+def resolve_category(cfg: dict, full_name: str) -> str:
+    """按主字段全名实时解析分类 record_id；不存在就报错，绝不自动创建。"""
+    return _resolve_category_record(cfg, full_name)["record_id"]
+
+
+def category_kind(cfg: dict, full_name: str) -> Optional[str]:
+    """按分类表「类型」决定方向：支出→expense，收入→income。
+
+    类型缺失或不可用（例如只写了分类名）时返回 None，由调用方要求用户显式
+    指定 --kind，绝不按金额正负猜方向。
+    """
+    record = _resolve_category_record(cfg, full_name)
+    return {"支出": "expense", "收入": "income"}.get(_category_type(record))
+
+
+def _check_category_direction(kind: str, record: dict, full_name: str) -> None:
+    """kind 与分类表「类型」必须一致，否则拒绝写入（避免把支出记进收入分类）。"""
+    expected = "支出" if kind == "expense" else "收入"
+    actual = _category_type(record)
+    label = full_name.strip()
+    if actual is None:
+        raise posting.PostingError(
+            "分类「%s」的「类型」缺失或不可用，无法确认%s；"
+            "请在分类表把类型设为 支出/收入"
+            % (label, posting.KIND_LABELS[kind])
+        )
+    if actual != expected:
+        raise posting.PostingError(
+            "分类「%s」的类型是「%s」，不能用于%s；请改用「%s」类型的分类"
+            % (label, actual, posting.KIND_LABELS[kind], expected)
+        )
 
 
 def _entry_kind(entry: Any) -> str:
@@ -231,7 +279,9 @@ def _normalized_entry(
                 "%s必须指定分类（category），例如「支出·餐饮·午餐」"
                 % posting.KIND_LABELS[kind]
             )
-        normalized["category"] = resolve_category(cfg, category_ref)
+        record = _resolve_category_record(cfg, category_ref)
+        _check_category_direction(kind, record, category_ref)
+        normalized["category"] = record["record_id"]
 
     return normalized, accounts
 
@@ -318,6 +368,8 @@ def execute(
                     _step_label(*step[:3]) for step in steps[index:]
                 ],
                 cause=exc,
+                created_ids=created_ids,
+                failed_step=_step_label(action, table_name, record_id),
             ) from exc
         completed.append(_step_label(action, table_name, record_id))
 
