@@ -35,6 +35,21 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(config.ConfigError):
             config.load_config(self.path)
 
+    def test_load_null_raises(self):
+        # `null` 是合法 JSON，但不是配置对象；不能当成“没有配置”。
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("null", encoding="utf-8")
+
+        with self.assertRaises(config.ConfigError):
+            config.load_config(self.path)
+
+    def test_load_array_raises(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("[]", encoding="utf-8")
+
+        with self.assertRaises(config.ConfigError):
+            config.load_config(self.path)
+
     def test_empty_config_shape(self):
         cfg = config.empty_config("appX", None)
 

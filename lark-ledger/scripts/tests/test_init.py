@@ -247,6 +247,22 @@ class SchemaAssetTest(unittest.TestCase):
                 field["style"], style, "%s.%s" % (table_name, field_name)
             )
 
+    def test_annual_rate_description_documents_fraction_storage(self):
+        # percentage=true 存的是小数：4.2% ⇒ 0.042，字段描述必须写清楚。
+        field = self._field("账户", "年利率")
+        self.assertEqual(
+            field["description"],
+            "小数存储：4.2% 记作 0.042（读取后 ×100 才是百分数）",
+        )
+        self.assertEqual(field["style"], {"type": "plain", "percentage": True})
+
+    def test_conventions_block_pins_annual_rate_unit(self):
+        # 顶层 conventions 只给脚本/文档看，不会进入 +table-create。
+        self.assertEqual(
+            self.schema["conventions"],
+            {"账户.年利率": "fraction（0.042 表示 4.2%）"},
+        )
+
     def test_formula_expressions(self):
         for (table_name, field_name), expression in EXPECTED_FORMULAS.items():
             field = self._field(table_name, field_name)
@@ -373,6 +389,8 @@ class InitTestBase(unittest.TestCase):
     def setUp(self):
         self.created_tables = []
         self._patches = []
+        # 保存未被 mock 的 load_config，供“配置文件存在但内容非法”的用例直读临时文件。
+        self._real_load_config = config.load_config
 
         def patch(target, **kwargs):
             patcher = mock.patch(target, **kwargs)
@@ -393,6 +411,7 @@ class InitTestBase(unittest.TestCase):
             side_effect=config.ConfigError("还没有配置"),
         )
         self.save_config = patch("init_flow.config.save_config")
+        self.sleep = patch("time.sleep")
         self.create_base_library = patch(
             "init_flow.lark.create_base_library",
             return_value={"app_token": "app1", "node_token": "nod1"},
@@ -450,6 +469,10 @@ class InitTestBase(unittest.TestCase):
         return cfg
 
     def _use_existing_config(self, cfg):
+        # 幂等分支以配置文件存在为前提，落一份真实文件到临时路径。
+        self.config_path.write_text(
+            json.dumps(cfg, ensure_ascii=False), encoding="utf-8"
+        )
         self.load_config.side_effect = None
         self.load_config.return_value = cfg
         self.list_tables.return_value = [
@@ -568,6 +591,77 @@ class InitFlowTest(InitTestBase):
         self.assertIn("分类", str(ctx.exception))
         self.save_config.assert_not_called()
 
+    def test_field_read_retry_recovers_after_async_delay(self):
+        # Base 的表/字段写入异步生效：第一遍读不到 市值，重试后应成功。
+        attempts = {"count": 0}
+
+        def flaky(app_token, table_id):
+            items = self._fields_for(table_id)
+            if table_id == "tbl_持仓":
+                attempts["count"] += 1
+                if attempts["count"] == 1:
+                    return [item for item in items if item["name"] != "市值"]
+            return items
+
+        self.list_fields.side_effect = flaky
+
+        cfg = init_flow.run_init(None)
+
+        self.assertEqual(
+            cfg["tables"]["持仓"]["fields"]["市值"], "fld_持仓_市值"
+        )
+        self.assertEqual(self.sleep.call_count, 1)
+
+    def test_field_read_missing_after_retries_names_base_and_tables(self):
+        self.list_fields.side_effect = lambda app_token, table_id: self._fields_for(
+            table_id, skip=("年利率",) if table_id == "tbl_账户" else ()
+        )
+
+        with self.assertRaises(init_flow.InitError) as ctx:
+            init_flow.run_init(None)
+
+        message = str(ctx.exception)
+        self.assertIn("年利率", message)
+        self.assertIn("重试 3 次", message)
+        self.assertIn("app_token=app1", message)
+        self.assertIn("已建表 账户", message)
+        self.assertEqual(self.sleep.call_count, 2)
+        self.save_config.assert_not_called()
+
+    def test_mid_init_failure_reports_created_base(self):
+        self.create_records.side_effect = lark.LarkError("写分类失败", {"code": 1})
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            init_flow.run_init(None)
+
+        message = str(ctx.exception)
+        self.assertIn("写分类失败", message)
+        self.assertIn("app_token=app1", message)
+        self.assertIn("node_token=nod1", message)
+        self.assertIn(
+            "已建表 账户、分类、持仓、收支明细、行情快照、资产快照", message
+        )
+        self.assertEqual(ctx.exception.payload, {"code": 1})
+        self.save_config.assert_not_called()
+
+    def test_create_table_failure_names_only_created_tables(self):
+        def fail_on_holding(app_token, name, fields):
+            self.created_tables.append({"name": name, "fields": fields})
+            if name == "持仓":
+                raise lark.LarkError("建表失败")
+            return "tbl_" + name
+
+        self.create_table.side_effect = fail_on_holding
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            init_flow.run_init(None)
+
+        message = str(ctx.exception)
+        self.assertIn("app_token=app1", message)
+        self.assertIn("已建表 账户、分类）", message)
+        self.assertNotIn("持仓", message)
+        self.save_config.assert_not_called()
+
     def test_config_saved_with_ids(self):
         cfg = init_flow.run_init(None)
 
@@ -654,12 +748,26 @@ class InitFlowTest(InitTestBase):
     def test_unreadable_existing_config_is_not_treated_as_first_run(self):
         # 配置存在但解析失败时不能悄悄新建一个 Base。
         self.config_path.write_text("{bad json", encoding="utf-8")
+        self.load_config.side_effect = self._real_load_config
 
         with self.assertRaises(config.ConfigError):
             init_flow.run_init(None)
 
         self.create_base_library.assert_not_called()
         self.save_config.assert_not_called()
+
+    def test_non_object_existing_config_is_not_treated_as_first_run(self):
+        # `null`/`[]` 都是合法 JSON；存在这种文件时也不能新建 Base。
+        for payload in ("null", "[]"):
+            with self.subTest(payload=payload):
+                self.config_path.write_text(payload, encoding="utf-8")
+                self.load_config.side_effect = self._real_load_config
+
+                with self.assertRaises(config.ConfigError):
+                    init_flow.run_init(None)
+
+                self.create_base_library.assert_not_called()
+                self.save_config.assert_not_called()
 
 
 class LedgerCliTest(InitTestBase):
@@ -704,12 +812,23 @@ class LedgerCliTest(InitTestBase):
 
     def test_config_error_exit_3(self):
         self.config_path.write_text("{bad json", encoding="utf-8")
+        self.load_config.side_effect = self._real_load_config
 
         with captured_output() as (out, err):
             code = ledger.main(["init"])
 
         self.assertEqual(code, 3)
         self.assertIn("配置", err.getvalue())
+
+    def test_mid_init_failure_exit_4_names_base(self):
+        self.create_records.side_effect = lark.LarkError("写分类失败")
+
+        with captured_output() as (out, err):
+            code = ledger.main(["init"])
+
+        self.assertEqual(code, 4)
+        self.assertIn("app_token=app1", err.getvalue())
+        self.save_config.assert_not_called()
 
     def test_bad_args_exit_2(self):
         with captured_output():

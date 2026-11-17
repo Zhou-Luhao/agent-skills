@@ -1,4 +1,7 @@
 {
+  "conventions": {
+    "账户.年利率": "fraction（0.042 表示 4.2%）"
+  },
   "tables": [
     {
       "name": "账户",
@@ -29,6 +32,7 @@
         {
           "type": "number",
           "name": "年利率",
+          "description": "小数存储：4.2% 记作 0.042（读取后 ×100 才是百分数）",
           "style": {"type": "plain", "percentage": true}
         },
         {

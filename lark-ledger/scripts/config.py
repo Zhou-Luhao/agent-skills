@@ -16,16 +16,22 @@ class ConfigError(RuntimeError):
 
 
 def load_config(path: Optional[pathlib.Path] = None) -> dict:
-    """读取配置；文件不存在或不是合法 JSON 时抛 ConfigError。"""
+    """读取配置；文件不存在、不是合法 JSON 或顶层不是对象时抛 ConfigError。"""
     target = CONFIG_PATH if path is None else pathlib.Path(path)
     try:
         text = target.read_text(encoding="utf-8")
     except OSError as exc:
         raise ConfigError(f"读不到配置文件 {target}：{exc}") from exc
     try:
-        return json.loads(text)
+        cfg = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ConfigError(f"配置文件不是合法 JSON {target}：{exc}") from exc
+    if not isinstance(cfg, dict):
+        raise ConfigError(
+            "配置文件顶层必须是 JSON 对象 %s，实际是 %s"
+            % (target, type(cfg).__name__)
+        )
+    return cfg
 
 
 def save_config(cfg: dict, path: Optional[pathlib.Path] = None) -> None:
