@@ -17,6 +17,8 @@ import random
 import re
 from typing import Any, Callable, Dict, List, Tuple
 
+import loans
+
 # 表名是 WritePlan 的键，集中在此便于下游引用。
 ENTRY_TABLE = "收支明细"
 ACCOUNT_TABLE = "账户"
@@ -31,6 +33,7 @@ SUPPORTED_KINDS = (
     "invest_buy",
     "invest_sell",
     "dividend",
+    "loan_repay",
 )
 KIND_LABELS = {
     "income": "收入",
@@ -39,6 +42,7 @@ KIND_LABELS = {
     "invest_buy": "理财买入",
     "invest_sell": "理财卖出",
     "dividend": "理财分红",
+    "loan_repay": "贷款还款",
 }
 INVEST_KINDS = ("invest_buy", "invest_sell")
 
@@ -157,6 +161,7 @@ def _reject_present(entry: dict, key: str, message: str) -> None:
 
 
 INVESTMENT_ACCOUNT_TYPE = "理财"
+LOAN_ACCOUNT_TYPE = "负债"
 
 
 def _number_text(value: float) -> str:
@@ -518,6 +523,52 @@ def _validate_dividend(
         )
 
 
+def _validate_loan_repay(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+    holdings: Dict[str, dict] = None,
+) -> None:
+    """贷款还款：负债账户存在且类型=负债，付款账户不同，利息分类齐全。"""
+    loan_id = _loan_account_id(entry, accounts)
+    if loan_id == account:
+        raise PostingError(
+            "贷款还款的付款账户与负债账户不能相同：%s；"
+            "请确认资金从哪张银行卡/现金账户扣款"
+            % _account_label(account, accounts)
+        )
+    _require_liability_account(loan_id, accounts)
+    _reject_present(
+        entry,
+        "to_account",
+        "贷款还款不需要转入账户（to_account）：本金转入 loan_account "
+        "指定的负债账户；请确认记账类型",
+    )
+    _reject_present(
+        entry,
+        "from_account",
+        "贷款还款不需要转出账户（from_account）：付款账户用 account；"
+        "请确认记账类型",
+    )
+    for key, label in (
+        ("holding", "持仓"),
+        ("price", "成交价"),
+        ("shares", "份额"),
+        ("pnl_category", "已实现盈亏分类"),
+    ):
+        _reject_present(
+            entry,
+            key,
+            "贷款还款不需要%s（%s）：本息拆分只按 剩余本金×年利率/12 计算；"
+            "如果是理财交易请改用对应的 --kind" % (label, key),
+        )
+    _interest_category(entry)
+    # 提前还款/金额不足以覆盖利息/利率单位错误等边界在这里就暴露，
+    # 不等到 plan 阶段才炸（validate_entry 可单独调用）。
+    _loan_split(entry, accounts)
+
+
 VALIDATORS: Dict[str, Callable[..., None]] = {
     "income": _validate_cash,
     "expense": _validate_cash,
@@ -525,6 +576,7 @@ VALIDATORS: Dict[str, Callable[..., None]] = {
     "invest_buy": _validate_invest_buy,
     "invest_sell": _validate_invest_sell,
     "dividend": _validate_dividend,
+    "loan_repay": _validate_loan_repay,
 }
 
 
@@ -572,6 +624,11 @@ def balance_deltas(entry: dict, accounts: Dict[str, dict]) -> Dict[str, float]:
         return {target: round(amount, 2)}
     if kind == "dividend":
         return {account: round(amount, 2)}
+    if kind == "loan_repay":
+        loan_id = _loan_account_id(entry, accounts)
+        _, principal = _loan_split(entry, accounts)
+        # 付款账户只出总额；负债余额只被本金推动（更接近 0）。
+        return {account: round(-amount, 2), loan_id: round(principal, 2)}
 
     target = _account_id(entry, "to_account", "转入账户", accounts)
     if target == account:
@@ -590,6 +647,76 @@ def _current_balance(account_id: str, accounts: Dict[str, dict]) -> float:
         fields["当前余额"],
         "账户「%s」的当前余额" % _account_label(account_id, accounts),
     )
+
+
+def _require_liability_account(
+    account_id: str, accounts: Dict[str, dict]
+) -> None:
+    """贷款还款只能落在「类型=负债」的账户，否则会把本金记到资产账户上。"""
+    fields = accounts.get(account_id)
+    type_text = _select_text(fields.get("类型") if isinstance(fields, dict) else None)
+    types = [part.strip() for part in type_text.split("、") if part.strip()]
+    if LOAN_ACCOUNT_TYPE not in types:
+        raise PostingError(
+            "账户「%s」的类型是「%s」，不是负债账户；贷款还款的 loan_account"
+            " 必须是「类型=负债」的账户（先用 `ledger.py account list` 查看）"
+            % (_account_label(account_id, accounts), type_text or "未填写")
+        )
+
+
+def _loan_account_id(entry: dict, accounts: Dict[str, dict]) -> str:
+    """取出贷款还款的负债账户 record_id（必须已在账户快照里）。"""
+    return _account_id(entry, "loan_account", "负债账户", accounts)
+
+
+def _interest_category(entry: dict) -> str:
+    """利息分类：优先 interest_category，兼容直接调用方传 category。"""
+    for key in ("interest_category", "category"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise PostingError(
+        "贷款还款必须指定利息分类（interest_category），"
+        "例如「支出·金融·利息支出」；请用 --category 指定"
+    )
+
+
+def _loan_rate(loan_id: str, accounts: Dict[str, dict]) -> float:
+    """读取负债账户的年利率单元格原值（小数，4.2% ⇒ 0.042）。"""
+    fields = accounts.get(loan_id)
+    raw = fields.get("年利率") if isinstance(fields, dict) else None
+    if not _present(raw):
+        raise PostingError(
+            "负债账户「%s」缺少「年利率」，无法拆分本息；"
+            "请先用 `ledger.py account edit <账户> --rate 4.2` 补年利率"
+            % _account_label(loan_id, accounts)
+        )
+    return _number(
+        raw, "负债账户「%s」的年利率" % _account_label(loan_id, accounts)
+    )
+
+
+def _loan_split(entry: dict, accounts: Dict[str, dict]) -> Tuple[float, float]:
+    """按剩余本金（负债余额取反）与账户年利率拆分本息，返回 (利息, 本金)。"""
+    loan_id = _loan_account_id(entry, accounts)
+    total = _amount(entry)
+    # 负债余额是负数（剩余本金），算法收正数剩余本金。
+    remaining = round(-_current_balance(loan_id, accounts), 2)
+    rate = _loan_rate(loan_id, accounts)
+    try:
+        return loans.split_payment(remaining, rate, total)
+    except loans.LoanError as exc:
+        raise PostingError(
+            "贷款本息拆分失败（负债账户「%s」剩余本金 %.2f、年利率 %s、"
+            "还款总额 %.2f）：%s"
+            % (
+                _account_label(loan_id, accounts),
+                remaining,
+                _number_text(rate),
+                total,
+                exc,
+            )
+        )
 
 
 def _detail_fields(
@@ -726,6 +853,35 @@ def _plan_dividend(
     return [(ENTRY_TABLE, fields)]
 
 
+def _plan_loan_repay(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+    amount: float,
+    holdings: Dict[str, dict] = None,
+) -> List[Tuple[str, Dict[str, Any]]]:
+    """贷款还款两条明细：①利息支出；②本金转账（银行卡→负债）；同组 tag。"""
+    loan_id = _loan_account_id(entry, accounts)
+    interest, principal = _loan_split(entry, accounts)
+    note = "%s本金%.2f+利息%.2f%s" % (
+        entry.get("note") or "",
+        principal,
+        interest,
+        group_tag(),
+    )
+
+    interest_row = _detail_fields("expense", entry, account, interest)
+    interest_row["分类"] = [{"id": _interest_category(entry)}]
+    interest_row["备注"] = note
+
+    principal_row = _detail_fields("transfer", entry, account, principal)
+    principal_row["转入账户"] = [{"id": loan_id}]
+    principal_row["备注"] = note
+
+    return [(ENTRY_TABLE, interest_row), (ENTRY_TABLE, principal_row)]
+
+
 PLANNERS: Dict[str, Callable[..., List[Tuple[str, Dict[str, Any]]]]] = {
     "income": _plan_cash,
     "expense": _plan_cash,
@@ -733,6 +889,7 @@ PLANNERS: Dict[str, Callable[..., List[Tuple[str, Dict[str, Any]]]]] = {
     "invest_buy": _plan_invest_buy,
     "invest_sell": _plan_invest_sell,
     "dividend": _plan_dividend,
+    "loan_repay": _plan_loan_repay,
 }
 
 

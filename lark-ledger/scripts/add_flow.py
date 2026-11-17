@@ -23,6 +23,8 @@ import snapshot_flow
 CATEGORY_TABLE = "分类"
 ENTRY_TABLE = posting.ENTRY_TABLE
 ACCOUNT_TABLE = posting.ACCOUNT_TABLE
+# 贷款利息的缺省分类（spec：房贷/车贷利息统一归 支出·金融·利息支出）。
+DEFAULT_INTEREST_CATEGORY = "支出·金融·利息支出"
 
 TZ_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -234,6 +236,7 @@ _PNL_CATEGORIES = {
 _IGNORED_FIELDS = {
     "to_account": "转入账户（to_account）",
     "from_account": "转出账户（from_account）",
+    "loan_account": "负债账户（loan_account）",
     "category": "分类（category）",
     "holding": "持仓（holding）",
     "price": "成交价（price）",
@@ -245,24 +248,41 @@ _IGNORED_FIELDS = {
 def _reject_irrelevant(entry: dict, kind: str) -> None:
     """拒绝与 kind 无关的参数：宁可报错，也不静默丢弃用户输入。"""
     if kind == "transfer":
-        _reject_fields(entry, kind, ("category", "from_account", "holding", "price", "shares"))
+        _reject_fields(
+            entry,
+            kind,
+            ("category", "from_account", "loan_account", "holding", "price", "shares"),
+        )
         return
     if kind in ("income", "expense"):
         _reject_fields(
-            entry, kind, ("to_account", "from_account", "holding", "price", "shares")
+            entry,
+            kind,
+            ("to_account", "from_account", "loan_account", "holding", "price", "shares"),
         )
         return
     if kind == "invest_buy":
-        _reject_fields(entry, kind, ("to_account", "category", "pnl_category"))
+        _reject_fields(
+            entry, kind, ("to_account", "loan_account", "category", "pnl_category")
+        )
         return
     if kind == "invest_sell":
-        _reject_fields(entry, kind, ("from_account", "pnl_category"))
+        _reject_fields(
+            entry, kind, ("from_account", "loan_account", "pnl_category")
+        )
         return
     if kind == "dividend":
         _reject_fields(
             entry,
             kind,
-            ("to_account", "from_account", "holding", "price", "shares"),
+            ("to_account", "from_account", "loan_account", "holding", "price", "shares"),
+        )
+        return
+    if kind == "loan_repay":
+        _reject_fields(
+            entry,
+            kind,
+            ("to_account", "from_account", "holding", "price", "shares", "pnl_category"),
         )
 
 
@@ -371,6 +391,19 @@ def _normalized_entry(
         record = _resolve_category_record(cfg, category_ref)
         _check_category_direction("income", record, category_ref)
         normalized["pnl_category"] = record["record_id"]
+    elif kind == "loan_repay":
+        loan_ref = entry.get("loan_account")
+        if not _present(loan_ref):
+            raise posting.PostingError(
+                "贷款还款必须指定负债账户（--loan-account 房贷）"
+            )
+        loan = master_data.resolve_account(cfg, loan_ref)
+        accounts[loan["record_id"]] = loan["fields"]
+        normalized["loan_account"] = loan["record_id"]
+        category_ref = entry.get("category") or DEFAULT_INTEREST_CATEGORY
+        record = _resolve_category_record(cfg, category_ref)
+        _check_category_direction("expense", record, category_ref)
+        normalized["interest_category"] = record["record_id"]
     else:
         category_ref = entry.get("category")
         if not _present(category_ref):

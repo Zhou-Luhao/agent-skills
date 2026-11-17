@@ -174,7 +174,7 @@ def _add_add_parser(subparsers) -> None:
     add = subparsers.add_parser(
         "add",
         help=(
-            "记一笔收入/支出/转账/理财买卖/分红"
+            "记一笔收入/支出/转账/理财买卖/分红/贷款还款"
             "（明细 + 账户余额/持仓联动）"
         ),
     )
@@ -198,7 +198,7 @@ def _add_add_parser(subparsers) -> None:
         type=float,
         help=(
             "金额必须大于 0（方向由 --kind 或分类类型决定，不看金额符号）；"
-            "收入/支出/分红必填。理财买入可用 --amount 按 --price 换算份额，"
+            "收入/支出/分红/贷款还款必填。理财买入可用 --amount 按 --price 换算份额，"
             "脚本会按 价格×份额 重算转账金额；不要与 --shares 同用"
         ),
     )
@@ -207,12 +207,19 @@ def _add_add_parser(subparsers) -> None:
         "--to-account", default=None, help="转入账户（转账/理财卖出）"
     )
     add.add_argument(
+        "--loan-account",
+        dest="loan_account",
+        default=None,
+        help="负债账户名称或 record_id（贷款还款必填）",
+    )
+    add.add_argument(
         "--category",
         default=None,
         help=(
             "分类全名，如 支出·餐饮·午餐（收入/支出必填；"
             "理财卖出可选，缺省按品种路由到「收入·理财收益」下；"
-            "分红缺省为 收入·理财收益·分红）"
+            "分红缺省为 收入·理财收益·分红；"
+            "贷款还款缺省为 支出·金融·利息支出）"
         ),
     )
     add.add_argument(
@@ -280,16 +287,46 @@ _AUTO_AMBIGUOUS = "方向不明确，请用 --kind income|expense 指定"
 
 # kind → 不允许出现的开关。宁可报错，也不静默丢弃用户给的交易参数。
 _FORBIDDEN_ADD_FLAGS = {
-    "transfer": ("holding", "price", "shares", "from_account", "category"),
-    "income": ("to_account", "from_account", "holding", "price", "shares"),
-    "expense": ("to_account", "from_account", "holding", "price", "shares"),
-    "invest_buy": ("to_account", "category"),
-    "invest_sell": ("amount", "from_account"),
-    "dividend": ("to_account", "from_account", "holding", "price", "shares"),
+    "transfer": (
+        "holding",
+        "price",
+        "shares",
+        "from_account",
+        "loan_account",
+        "category",
+    ),
+    "income": (
+        "to_account",
+        "from_account",
+        "loan_account",
+        "holding",
+        "price",
+        "shares",
+    ),
+    "expense": (
+        "to_account",
+        "from_account",
+        "loan_account",
+        "holding",
+        "price",
+        "shares",
+    ),
+    "invest_buy": ("to_account", "loan_account", "category"),
+    "invest_sell": ("amount", "from_account", "loan_account"),
+    "dividend": (
+        "to_account",
+        "from_account",
+        "loan_account",
+        "holding",
+        "price",
+        "shares",
+    ),
+    "loan_repay": ("to_account", "from_account", "holding", "price", "shares"),
 }
 _ADD_FLAG_LABELS = {
     "amount": "--amount",
     "to_account": "--to-account",
+    "loan_account": "--loan-account",
     "category": "--category",
     "holding": "--holding",
     "price": "--price",
@@ -383,6 +420,13 @@ def _run_add(args: argparse.Namespace) -> int:
     elif kind == "dividend":
         if args.amount is None:
             return _usage_error("理财分红必须指定 --amount（分红金额）")
+    elif kind == "loan_repay":
+        if args.amount is None:
+            return _usage_error("贷款还款必须指定 --amount（还款总额）")
+        if args.loan_account is None:
+            return _usage_error(
+                "贷款还款必须指定 --loan-account（负债账户名称或 record_id）"
+            )
 
     entry = {
         "kind": kind,
@@ -415,6 +459,12 @@ def _run_add(args: argparse.Namespace) -> int:
     elif kind == "dividend":
         entry["amount"] = args.amount
         entry["category"] = args.category or "收入·理财收益·分红"
+    elif kind == "loan_repay":
+        entry["amount"] = args.amount
+        entry["loan_account"] = args.loan_account
+        entry["category"] = (
+            args.category or add_flow.DEFAULT_INTEREST_CATEGORY
+        )
 
     if cfg is None:
         cfg = config.load_config()
