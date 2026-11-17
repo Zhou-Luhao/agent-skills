@@ -179,6 +179,24 @@ class AuthTest(unittest.TestCase):
         self.assertTrue(lark.auth_ok())
 
     @mock.patch("lark.subprocess.run")
+    def test_needs_refresh_unavailable_is_false(self, run):
+        run.return_value = _proc(
+            json.dumps(
+                {
+                    "identities": {
+                        "user": {
+                            "status": "needs_refresh",
+                            "tokenStatus": "needs_refresh",
+                            "available": False,
+                        }
+                    }
+                }
+            )
+        )
+
+        self.assertFalse(lark.auth_ok())
+
+    @mock.patch("lark.subprocess.run")
     def test_user_not_ready(self, run):
         run.return_value = _proc(
             json.dumps({"identities": {"user": {"status": "expired"}}})

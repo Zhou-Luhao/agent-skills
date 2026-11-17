@@ -6,6 +6,7 @@
 
 import json
 import pathlib
+import sys
 import time
 from typing import List, Optional
 
@@ -21,6 +22,10 @@ DEFAULT_BASE_NAME = "个人账本"
 # 而不是逐表写完立刻读回（lark-base skill 明确要求不要逐项写后立即读）。
 FIELD_READ_ATTEMPTS = 3
 FIELD_READ_BACKOFF_SECONDS = 0.5
+# 新 Base 的默认表可能延迟出现在 table-list 里；建完 schema 表后按 1s 退避
+# 重列几次再放弃（与 lark-cli +base-create 清理默认表的等待节奏一致）。
+STRAY_TABLE_ATTEMPTS = 3
+STRAY_TABLE_DELAY_SECONDS = 1.0
 
 
 class InitError(RuntimeError):
@@ -221,20 +226,56 @@ def _collect_field_ids(app_token: str, cfg: dict, schema: dict) -> None:
 def _remove_stray_tables(app_token: str, schema: dict) -> None:
     """删掉新建 Base 附带的平台默认表，保证最终只有 schema 里的 6 张表。
 
-    `base +base-create` / `wiki +node-create` 都会先建一张默认表；这里在
-    建 schema 表之前清掉它。只用于全新 Base（刚由 init 创建），不会碰既有账本。
+    必须在 schema 表建完之后调用：飞书不允许删除 Base 的最后一张表，先删
+    默认表会直接失败。默认表可能延迟出现在 table-list 里，因此按
+    STRAY_TABLE_DELAY_SECONDS 重列几次；重试后仍删不掉只告警，不中断 init。
     """
     schema_names = {table["name"] for table in schema["tables"]}
-    for item in lark.list_tables(app_token):
-        name = _table_name(item)
-        if name in schema_names:
-            continue
-        table_id = item.get("table_id") or item.get("id")
-        if not isinstance(table_id, str) or not table_id:
-            raise InitError(
-                "Base 的默认表缺少 table_id，无法清理：%r" % (item,)
-            )
-        lark.delete_table(app_token, table_id)
+    remaining: List[str] = []
+    for attempt in range(STRAY_TABLE_ATTEMPTS):
+        try:
+            items = lark.list_tables(app_token)
+        except lark.LarkError as exc:
+            remaining = ["重新列出表失败：%s" % exc]
+        else:
+            strays = []
+            for item in items:
+                name = _table_name(item)
+                if name in schema_names:
+                    continue
+                table_id = item.get("table_id") or item.get("id")
+                strays.append(
+                    (
+                        name or "（未命名表）",
+                        table_id if isinstance(table_id, str) else "",
+                    )
+                )
+            if not strays:
+                # 默认表可能延迟可见：最后一轮之前再等 1s 重列。
+                if attempt + 1 < STRAY_TABLE_ATTEMPTS:
+                    time.sleep(STRAY_TABLE_DELAY_SECONDS)
+                    continue
+                return
+            remaining = []
+            for name, table_id in strays:
+                if not table_id:
+                    remaining.append("%s（缺少 table_id）" % name)
+                    continue
+                try:
+                    lark.delete_table(app_token, table_id)
+                except lark.LarkError as exc:
+                    remaining.append("%s：%s" % (name, exc))
+            if not remaining:
+                # 删除成功即可返回；失败才进入下一轮重列重试。
+                return
+        if attempt + 1 < STRAY_TABLE_ATTEMPTS:
+            time.sleep(STRAY_TABLE_DELAY_SECONDS)
+    if remaining:
+        print(
+            "警告：init 无法删除 Base 里多余的表（%s）；已继续初始化，"
+            "但账本会多出这些表，请到飞书手动删除。" % "；".join(remaining),
+            file=sys.stderr,
+        )
 
 
 def _partial_note(
@@ -281,9 +322,6 @@ def _create_all(
             app_token = created["app_token"]
             node_token = created["node_token"]
 
-        # 平台建 Base 时会附带一张默认表；先清掉，保证最终正好 6 张 schema 表。
-        _remove_stray_tables(app_token, schema)
-
         cfg = config.empty_config(app_token, node_token)
         cfg["base_name"] = base_name
         # 先建齐 6 张表（link 只指向更早的表），字段 id 留到最后统一回读。
@@ -292,6 +330,10 @@ def _create_all(
             table_id = lark.create_table(app_token, name, table["fields"])
             cfg["tables"][name] = {"table_id": table_id, "fields": {}}
             created_tables.append(name)
+
+        # 平台建 Base 时会附带一张默认表。必须等 6 张 schema 表建完再删：
+        # 飞书不允许删除 Base 的最后一张表。
+        _remove_stray_tables(app_token, schema)
 
         _collect_field_ids(app_token, cfg, schema)
 

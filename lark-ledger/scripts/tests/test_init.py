@@ -518,30 +518,94 @@ class InitFlowTest(InitTestBase):
             self.assertEqual(call.args[0], "app1")
             self.assertEqual(call.args[2], table["fields"])
 
-    def test_removes_platform_default_table_before_schema(self):
-        # base/wiki 创建 bitable 时会附带一张平台默认表；fresh init 必须删掉。
-        self.list_tables.return_value = [
-            {"table_id": "tbl_default", "name": "数据表"}
-        ]
+    def _use_fake_base_tables(self, hide_stray_first=False):
+        """模拟飞书 Base 的表集合；delete_table 拒绝删掉最后一张表。"""
+        tables = {"数据表": "tbl_default"}
+        calls = {"list": 0, "create": 0}
+
+        def list_tables(app_token):
+            calls["list"] += 1
+            visible = dict(tables)
+            if hide_stray_first and calls["list"] == 1:
+                visible.pop("数据表", None)
+            return [
+                {"table_id": table_id, "name": name}
+                for name, table_id in visible.items()
+            ]
+
+        def create_table(app_token, name, fields):
+            calls["create"] += 1
+            self.created_tables.append({"name": name, "fields": fields})
+            tables[name] = "tbl_" + name
+            return tables[name]
+
+        def delete_table(app_token, table_id):
+            if len(tables) <= 1:
+                raise lark.LarkError(
+                    "The last table cannot be deleted", {"code": 1254034}
+                )
+            for name, current in list(tables.items()):
+                if current == table_id:
+                    del tables[name]
+                    return
+            raise lark.LarkError("table not found", {"code": 1254040})
+
+        self.list_tables.side_effect = list_tables
+        self.create_table.side_effect = create_table
+        self.delete_table.side_effect = delete_table
+        return tables, calls
+
+    def test_fresh_init_ends_with_exactly_schema_tables(self):
+        # base/wiki 创建 bitable 时会附带一张平台默认表；init 后必须正好 6 张。
+        tables, calls = self._use_fake_base_tables()
 
         init_flow.run_init(None)
 
-        self.delete_table.assert_called_once_with("app1", "tbl_default")
         self.assertEqual(
-            len(self.create_table.call_args_list),
-            len(init_flow.load_schema()["tables"]),
+            set(tables),
+            {table["name"] for table in init_flow.load_schema()["tables"]},
         )
+        self.assertEqual(calls["create"], 6)
+        self.delete_table.assert_called_once_with("app1", "tbl_default")
 
-    def test_folder_init_removes_platform_default_table_too(self):
-        self.create_base_folder.return_value = "app2"
-        self.list_tables.return_value = [
-            {"table_id": "tbl_default", "name": "数据表"}
-        ]
+    def test_folder_init_ends_with_exactly_schema_tables(self):
+        tables, calls = self._use_fake_base_tables()
 
         init_flow.run_init("fld1")
 
+        self.assertEqual(
+            set(tables),
+            {table["name"] for table in init_flow.load_schema()["tables"]},
+        )
+        self.assertEqual(calls["create"], 6)
         self.delete_table.assert_called_once_with("app2", "tbl_default")
-        self.assertEqual(len(self.create_table.call_args_list), 6)
+
+    def test_default_table_hidden_on_first_list_is_retried(self):
+        # 表可见性是异步的：第一轮列表看不到默认表，必须重列后再删。
+        tables, calls = self._use_fake_base_tables(hide_stray_first=True)
+
+        init_flow.run_init(None)
+
+        self.assertGreaterEqual(calls["list"], 2)
+        self.assertGreaterEqual(self.sleep.call_count, 1)
+        self.assertEqual(
+            set(tables),
+            {table["name"] for table in init_flow.load_schema()["tables"]},
+        )
+        self.delete_table.assert_called_once_with("app1", "tbl_default")
+
+    def test_unremovable_stray_table_warns_but_initializes(self):
+        # 清理默认表是尽力而为：删不掉只告警，不能让整个 init 失败。
+        self._use_fake_base_tables()
+        self.delete_table.side_effect = lark.LarkError("权限不足")
+
+        with captured_output() as (out, err):
+            cfg = init_flow.run_init(None)
+
+        self.assertTrue(cfg.created)
+        self.assertIn("警告", err.getvalue())
+        self.assertIn("数据表", err.getvalue())
+        self.save_config.assert_called_once()
 
     def test_categories_written_with_full_name(self):
         init_flow.run_init(None)
@@ -640,7 +704,8 @@ class InitFlowTest(InitTestBase):
         self.assertEqual(
             cfg["tables"]["持仓"]["fields"]["市值"], "fld_持仓_市值"
         )
-        self.assertEqual(self.sleep.call_count, 1)
+        # 2 次是建表后清理默认表的延迟重列；1 次是字段回读退避。
+        self.assertEqual(self.sleep.call_count, 3)
 
     def test_field_read_missing_after_retries_names_base_and_tables(self):
         self.list_fields.side_effect = lambda app_token, table_id: self._fields_for(
@@ -655,7 +720,8 @@ class InitFlowTest(InitTestBase):
         self.assertIn("重试 3 次", message)
         self.assertIn("app_token=app1", message)
         self.assertIn("已建表 账户", message)
-        self.assertEqual(self.sleep.call_count, 2)
+        # 2 次是清理默认表的延迟重列；2 次是字段回读退避。
+        self.assertEqual(self.sleep.call_count, 4)
         self.save_config.assert_not_called()
 
     def test_mid_init_failure_reports_created_base(self):

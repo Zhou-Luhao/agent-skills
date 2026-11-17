@@ -143,8 +143,11 @@ def auth_ok() -> bool:
     if not isinstance(user, dict):
         return False
     # 空闲会话的 access token 会过期，`auth status` 报 needs_refresh 但
-    # available=true，下一次调用会自动刷新；这仍算已登录。
-    return user.get("status") in ("ready", "needs_refresh")
+    # available=true，下一次调用会自动刷新；这仍算已登录。available 显式
+    # 为 false 时不能当成可用会话。
+    if user.get("status") not in ("ready", "needs_refresh"):
+        return False
+    return user.get("available") is not False
 
 
 def to_ms(date_str: str) -> int:
@@ -162,8 +165,8 @@ def from_ms(ms: int) -> str:
 def date_cell_text(value: Any) -> str:
     """日期单元格 → `"YYYY-MM-DD"`；接受字符串或毫秒时间戳。
 
-    字符串取日期部分（兼容 `"YYYY-MM-DD 00:00"`）；毫秒值走 `from_ms`。
-    非日期输入返回空串，由调用方决定回退展示。
+    字符串取日期部分（兼容 `"YYYY-MM-DD 00:00"`），无法识别的字符串原样
+    返回；毫秒值走 `from_ms`；None/布尔等其他类型返回空串。
     """
     if isinstance(value, str):
         text = value.strip()
