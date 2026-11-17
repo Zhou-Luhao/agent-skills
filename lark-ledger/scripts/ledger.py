@@ -849,6 +849,9 @@ def _run_snapshot(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     # ConfigError → 3；LarkError → 4；SnapshotError → 5（由 main 统一映射）。
     result = snapshot_flow.run_snapshot(cfg, date_str)
+    warning = result.get("warning")
+    if warning:
+        print("警告：%s" % warning, file=sys.stderr)
     print(
         "资产快照完成：%s，写入 %d 行。"
         % (result["date"], result["written"])

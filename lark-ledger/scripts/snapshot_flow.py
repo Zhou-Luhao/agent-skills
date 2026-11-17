@@ -167,12 +167,17 @@ def _link_ids(value: Any) -> List[str]:
     return ids
 
 
-def _number(value: Any, label: str) -> float:
-    """数字单元格 → float；None/空串按 0 处理，非法值显式报错。"""
+def _required_number(value: Any, label: str) -> float:
+    """必填数字字段 → float；缺失/空白/非法值都抛 SnapshotError。
+
+    当前余额与当前份额是净值口径的输入：把缺失当成 0 会把整笔现金/份额
+    永久性地从净资产里抹掉，因此这里必须显式失败，交给上层警告并保留
+    上一次的 last_snapshot_date。
+    """
     if value is None:
-        return 0.0
+        raise SnapshotError("%s缺失（当前值 None），无法计算净值" % label)
     if isinstance(value, str) and not value.strip():
-        return 0.0
+        raise SnapshotError("%s是空白值，无法计算净值" % label)
     if isinstance(value, bool):
         raise SnapshotError("%s必须是数字，实际是布尔值" % label)
     try:
@@ -182,6 +187,19 @@ def _number(value: Any, label: str) -> float:
     if not math.isfinite(number):
         raise SnapshotError("%s必须是有限数字，实际是 %r" % (label, value))
     return number
+
+
+def _number(value: Any, label: str) -> float:
+    """可选数字单元格（目前只有最新价）→ float；缺失按 0 处理。
+
+    最新价在首次行情回补前本来就是未知的，此时持仓市值为 0 是可接受的
+    "尚未估值"；当前余额/份额不允许这种缺省，见 `_required_number`。
+    """
+    if value is None:
+        return 0.0
+    if isinstance(value, str) and not value.strip():
+        return 0.0
+    return _required_number(value, label)
 
 
 def _table(cfg: dict, table_name: str) -> Tuple[str, str]:
@@ -277,7 +295,9 @@ def _holdings_by_account(holdings: Any) -> Dict[str, float]:
         account_ids = _link_ids(fields.get(HOLDING_ACCOUNT_FIELD))
         if not account_ids:
             continue
-        shares = _number(fields.get(HOLDING_SHARES_FIELD), "持仓当前份额")
+        shares = _required_number(
+            fields.get(HOLDING_SHARES_FIELD), "持仓当前份额"
+        )
         price = _number(fields.get(HOLDING_LATEST_PRICE_FIELD), "持仓最新价")
         account_id = account_ids[0]
         totals[account_id] = totals.get(account_id, 0.0) + shares * price
@@ -351,7 +371,7 @@ def plan_snapshot(
             )
         seen_names[name] = account_id
 
-        value = _number(
+        value = _required_number(
             fields.get(ACCOUNT_BALANCE_FIELD),
             "账户「%s」的当前余额" % name,
         )
@@ -459,7 +479,11 @@ def _write_plan(app_token: str, table_id: str, plan: WritePlan) -> int:
 def run_snapshot(cfg: dict, date_str: Optional[str] = None) -> dict:
     """为指定日期（缺省今天 UTC+8）落一份资产快照。
 
-    同一日期重复执行只会 update 既有行，不会产生重复主键。
+    同一日期重复执行只会 update 既有行，不会产生重复主键。写入成功后把
+    `last_snapshot_date` 记成该日期，这样手动的周日快照也能被 `due_weekly`
+    看见，不会被下一周的"补上周日"近似值覆盖。零行写入不算成功：返回
+    `warning` 且不记日期，避免空表把整周标记成已完成。
+
     返回 `{"written": n, "date": "YYYY-MM-DD"}`；写表失败向上抛 LarkError。
     """
     if date_str is None:
@@ -471,9 +495,8 @@ def run_snapshot(cfg: dict, date_str: Optional[str] = None) -> dict:
     _, holding_table = _table(cfg, HOLDING_TABLE)
     _, snapshot_table = _table(cfg, SNAPSHOT_TABLE)
 
-    accounts = _index_records(
-        _search_all(app_token, account_table), ACCOUNT_TABLE
-    )
+    account_records = _search_all(app_token, account_table)
+    accounts = _index_records(account_records, ACCOUNT_TABLE)
     holdings = _index_records(
         _search_all(app_token, holding_table), HOLDING_TABLE
     )
@@ -481,7 +504,39 @@ def run_snapshot(cfg: dict, date_str: Optional[str] = None) -> dict:
 
     plan = plan_snapshot(accounts, holdings, day, rows=rows)
     written = _write_plan(app_token, snapshot_table, plan)
+    if written == 0:
+        return {
+            "written": 0,
+            "date": day,
+            "warning": _empty_snapshot_warning(account_records),
+        }
+
+    _stamp_last_snapshot(cfg, day)
     return {"written": written, "date": day}
+
+
+def _empty_snapshot_warning(account_records: List[dict]) -> str:
+    """零行写入的可行动提示：区分"没读到账户"与"没有在用账户"。"""
+    if not account_records:
+        return (
+            "资产快照未写入任何行：账户表没有读到任何账户，"
+            "可能尚未录入或读取异常；本次不记 last_snapshot_date"
+        )
+    return (
+        "资产快照未写入任何行：没有「在用」账户，"
+        "请先新增或启用账户；本次不记 last_snapshot_date"
+    )
+
+
+def _stamp_last_snapshot(cfg: dict, date_str: str) -> None:
+    """写入 `last_snapshot_date` 并落盘；保存失败则恢复内存中的旧值。"""
+    previous = cfg.get("last_snapshot_date")
+    cfg["last_snapshot_date"] = date_str
+    try:
+        config.save_config(cfg)
+    except Exception:
+        cfg["last_snapshot_date"] = previous
+        raise
 
 
 def maybe_weekly(
@@ -489,8 +544,8 @@ def maybe_weekly(
 ) -> Optional[dict]:
     """add 成功后的周快照钩子：到期才写，任何异常只警告、绝不抛出。
 
-    只有整轮写入成功后才把上周日记进 `cfg["last_snapshot_date"]`；
-    写入或保存配置失败时保持旧值，下一次 add 仍会重试（写入本身幂等）。
+    `run_snapshot` 只在真正写入后落 `last_snapshot_date`；零行写入或任何
+    失败都保持旧值，下一次 add 仍会重试（写入本身幂等）。
     """
     moment = _now() if now is None else now
     try:
@@ -502,14 +557,10 @@ def maybe_weekly(
             return None
 
         result = run_snapshot(cfg, due)
-
-        previous = cfg.get("last_snapshot_date")
-        cfg["last_snapshot_date"] = due
-        try:
-            config.save_config(cfg)
-        except Exception:
-            cfg["last_snapshot_date"] = previous
-            raise
+        warning = result.get("warning")
+        if warning:
+            print("警告：%s" % warning, file=sys.stderr)
+            return {"warning": warning, "errors": [warning]}
         return result
     except Exception as exc:  # 后置钩子边界：任何失败都只警告。
         warning = "资产快照失败（明细已落库，不影响记账）：%s" % exc

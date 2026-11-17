@@ -169,6 +169,57 @@ class PlanSnapshotTest(unittest.TestCase):
         self.assertEqual(list(rows), ["%s_在用理财" % DATE])
         self.assertEqual(rows["%s_在用理财" % DATE]["余额/市值"], 120.0)
 
+    def test_missing_balance_raises(self):
+        for missing in (None, "", "   "):
+            with self.subTest(missing=missing):
+                accounts = {
+                    "recW": account("recW", "理财账户", "理财", 1000)
+                }
+                accounts["recW"]["fields"]["当前余额"] = missing
+                with self.assertRaises(snapshot_flow.SnapshotError):
+                    snapshot_flow.plan_snapshot(accounts, {}, DATE)
+
+    def test_absent_balance_raises(self):
+        accounts = {"recW": account("recW", "理财账户", "理财", 1000)}
+        del accounts["recW"]["fields"]["当前余额"]
+        with self.assertRaises(snapshot_flow.SnapshotError):
+            snapshot_flow.plan_snapshot(accounts, {}, DATE)
+
+    def test_missing_shares_raises(self):
+        accounts = {"recW": account("recW", "理财账户", "理财", 1000)}
+        holdings = {"recH1": holding("recH1", "recW", 1000, 14.57)}
+        holdings["recH1"]["fields"]["当前份额"] = None
+        with self.assertRaises(snapshot_flow.SnapshotError):
+            snapshot_flow.plan_snapshot(accounts, holdings, DATE)
+
+    def test_empty_latest_price_contributes_zero(self):
+        accounts = {"recW": account("recW", "华泰证券", "理财", 500)}
+        for empty in (None, "", "  "):
+            with self.subTest(empty=empty):
+                holdings = {
+                    "recH1": holding("recH1", "recW", 100, 14.57)
+                }
+                holdings["recH1"]["fields"]["最新价"] = empty
+                rows = rows_by_key(
+                    snapshot_flow.plan_snapshot(accounts, holdings, DATE)
+                )
+                self.assertEqual(
+                    rows["%s_华泰证券" % DATE]["余额/市值"], 500.0
+                )
+
+    def test_wealth_without_holdings_snapshots_cash(self):
+        accounts = {"recW": account("recW", "华泰证券", "理财", 2500)}
+        rows = rows_by_key(
+            snapshot_flow.plan_snapshot(accounts, {}, DATE)
+        )
+        self.assertEqual(rows["%s_华泰证券" % DATE]["余额/市值"], 2500.0)
+
+    def test_empty_account_set_plan_is_empty(self):
+        self.assertEqual(
+            snapshot_flow.plan_snapshot({}, {}, DATE),
+            {"create": [], "update": []},
+        )
+
     def test_existing_key_updates(self):
         existing = [
             snapshot_row(
@@ -456,6 +507,90 @@ class SnapshotFlowTest(unittest.TestCase):
         self.assertEqual(len(self.search_calls), calls_after_first)
         self.assertEqual(len(self.created), 1)
 
+    def test_run_snapshot_stamps_last_snapshot_date(self):
+        snapshot_flow.run_snapshot(self.cfg, DATE)
+        self.assertEqual(self.cfg["last_snapshot_date"], DATE)
+        persisted = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["last_snapshot_date"], DATE)
+
+    def test_run_snapshot_does_not_stamp_on_write_failure(self):
+        self.cfg["last_snapshot_date"] = "2026-11-11"
+        self._save_cfg(self.cfg)
+        with mock.patch(
+            "lark.create_records",
+            side_effect=lark.LarkError("飞书挂了"),
+        ):
+            with self.assertRaises(lark.LarkError):
+                snapshot_flow.run_snapshot(self.cfg, DATE)
+        self.assertEqual(self.cfg["last_snapshot_date"], "2026-11-11")
+        persisted = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["last_snapshot_date"], "2026-11-11")
+
+    def test_manual_sunday_snapshot_prevents_weekly_overwrite(self):
+        self.cfg["last_snapshot_date"] = "2026-11-01"
+        self._save_cfg(self.cfg)
+        snapshot_flow.run_snapshot(self.cfg, "2026-11-15")
+        self.assertEqual(self.cfg["last_snapshot_date"], "2026-11-15")
+        created_before = len(self.created)
+        now = datetime.datetime(2026, 11, 18, 16, 0, tzinfo=UTC8)
+        self.assertIsNone(snapshot_flow.maybe_weekly(self.cfg, now))
+        self.assertEqual(len(self.created), created_before)
+        self.assertEqual(
+            {row["fields"]["日期-账户"] for row in self.snapshots},
+            {"2026-11-15_华泰证券", "2026-11-15_招行工资卡"},
+        )
+
+    def test_empty_account_table_warns_and_does_not_stamp(self):
+        self.accounts = []
+        with captured_output() as (out, err):
+            result = snapshot_flow.run_snapshot(self.cfg, DATE)
+        self.assertEqual(result["written"], 0)
+        self.assertIn("没有读到任何账户", result["warning"])
+        self.assertNotIn("在用", result["warning"])
+        self.assertIsNone(self.cfg["last_snapshot_date"])
+        persisted = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertIsNone(persisted["last_snapshot_date"])
+        self.assertEqual(self.created, [])
+
+    def test_no_active_accounts_warns_and_does_not_stamp(self):
+        self.accounts = [
+            account("recX", "已销户", "理财", 100, status="已销户")
+        ]
+        with captured_output() as (out, err):
+            result = snapshot_flow.run_snapshot(self.cfg, DATE)
+        self.assertEqual(result["written"], 0)
+        self.assertIn("没有「在用」账户", result["warning"])
+        self.assertIsNone(self.cfg["last_snapshot_date"])
+        self.assertEqual(self.created, [])
+
+    def test_maybe_weekly_missing_balance_warns_without_stamp_or_write(self):
+        self.cfg["last_snapshot_date"] = "2026-11-11"
+        self._save_cfg(self.cfg)
+        self.accounts[0]["fields"]["当前余额"] = ""
+        now = datetime.datetime(2026, 11, 18, 16, 0, tzinfo=UTC8)
+        with captured_output() as (out, err):
+            result = snapshot_flow.maybe_weekly(self.cfg, now)
+        self.assertIn("warning", result)
+        self.assertIn("当前余额", result["warning"])
+        self.assertIn("警告", err.getvalue())
+        self.assertEqual(self.cfg["last_snapshot_date"], "2026-11-11")
+        persisted = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["last_snapshot_date"], "2026-11-11")
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.snapshots, [])
+
+    def test_maybe_weekly_empty_accounts_warns_without_stamp(self):
+        self.cfg["last_snapshot_date"] = "2026-11-11"
+        self._save_cfg(self.cfg)
+        self.accounts = []
+        now = datetime.datetime(2026, 11, 18, 16, 0, tzinfo=UTC8)
+        with captured_output() as (out, err):
+            result = snapshot_flow.maybe_weekly(self.cfg, now)
+        self.assertIn("warning", result)
+        self.assertIn("没有读到任何账户", result["warning"])
+        self.assertEqual(self.cfg["last_snapshot_date"], "2026-11-11")
+        self.assertEqual(self.created, [])
+
     def test_maybe_weekly_same_week_skips(self):
         self.cfg["last_snapshot_date"] = "2026-11-16"
         now = datetime.datetime(2026, 11, 18, 16, 0, tzinfo=UTC8)
@@ -540,6 +675,21 @@ class SnapshotCliTest(unittest.TestCase):
         self.assertEqual(run.call_args[0][1], DATE)
         self.assertIn(DATE, out.getvalue())
         self.assertIn("3", out.getvalue())
+
+    def test_cli_snapshot_zero_rows_warns_but_exits_ok(self):
+        with mock.patch(
+            "snapshot_flow.run_snapshot",
+            return_value={
+                "written": 0,
+                "date": DATE,
+                "warning": "没有「在用」账户",
+            },
+        ):
+            with captured_output() as (out, err):
+                code = ledger.main(["snapshot", "--date", DATE])
+        self.assertEqual(code, 0)
+        self.assertIn("没有「在用」账户", err.getvalue())
+        self.assertIn("写入 0 行", out.getvalue())
 
     def test_cli_snapshot_defaults_to_today(self):
         with mock.patch(
