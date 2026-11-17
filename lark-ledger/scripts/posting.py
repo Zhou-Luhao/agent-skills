@@ -1255,22 +1255,22 @@ def _has_expense_row(rows: List[Any]) -> bool:
 
 
 def _missing_trade_row(rows: List[Any], accounts: Dict[str, dict]) -> bool:
-    """带 tag 的转账行是否像「丢了持仓交易行的理财买入」。
+    """带 tag 的转账行是否像「丢了持仓交易行的理财买卖」。
 
-    只有多行操作会被打 #G tag。买入的转账腿是「现金流入理财账户」
-    （转入账户=理财），若这样的 tagged 转账行没有持仓交易行，说明该组被
-    外部删掉了一行（方向行还在、成交行没了）；按行级 deltas 重放会把理财
-    账户闲置现金算错，必须判为不可信。
+    只有多行操作会被打 #G tag；一条连着理财账户的 tagged 转账行却没有
+    持仓交易行，说明该组被外部删掉了一行（方向行还在、成交行没了）。
+    此时按行级 deltas 重放会把理财账户闲置现金算错，必须判为不可信。
 
-    不能只看「有一端是理财账户」：贷款还款允许从理财账户（如余额宝）付款，
-    会生成 tagged 的 理财→负债 本金转账行，同时组内还有利息支出行——那是
-    合法的 loan_repay，不能误判。因此要求：
-    - 理财在 **转入账户**（现金流入，买入的方向）；
-    - 组内没有「支出」行（排除贷款还款的利息支出）。
-    卖出组的方向行缺失由 `_trade_direction` 判空覆盖。
+    两个方向都要覆盖：
+
+    - 买入的转账腿是「现金流入理财账户」（转入账户=理财）——credited 侧；
+    - 卖出的转账腿是「现金流出理财账户」（账户=理财）——debited 侧。
+      但贷款还款允许从理财账户（如余额宝）付款，会生成 tagged 的
+      理财→负债 本金转账行，同时组内还有利息支出行；这种合法 loan_repay
+      不能误判，所以 debited 侧仅在组内没有「支出」行时成立
+      （卖出组只有收入 P&L 行，仍会被正确判为缺成交行）。
     """
-    if _has_expense_row(rows):
-        return False
+    has_expense = _has_expense_row(rows)
     for row in rows:
         if row_tag(row) is None:
             continue
@@ -1285,6 +1285,11 @@ def _missing_trade_row(rows: List[Any], accounts: Dict[str, dict]) -> bool:
         if not source or not target or source == target:
             continue
         if INVESTMENT_ACCOUNT_TYPE in _account_types(target, accounts):
+            return True
+        if (
+            INVESTMENT_ACCOUNT_TYPE in _account_types(source, accounts)
+            and not has_expense
+        ):
             return True
     return False
 

@@ -543,6 +543,40 @@ class ReplayTest(unittest.TestCase):
             replayed["holdings"]["h1"]["shares"], 1000.0
         )
 
+    def test_replay_sell_trade_row_missing_taints_not_row_sum(self):
+        # tagged 的 理财→银行卡 卖出转账 + 收入 P&L 行，持仓成交行被删：
+        # 行级求和会得到理财 40000 / 银行 112000；必须判 tainted 并整组跳过。
+        accounts = {
+            "a_bank": account_record("a_bank", "招行", "银行卡", 100000)[
+                "fields"
+            ],
+            "a_invest": account_record("a_invest", "华泰", "理财", 50000)[
+                "fields"
+            ],
+        }
+        holdings = {"h1": holding_record("h1", "茅台", 1000, 10)["fields"]}
+        tag = " #G0000ca11"
+        entries = [
+            entry_row(
+                "s1", "转账", 12000, "a_invest", to="a_bank",
+                note=tag, created=100,
+            ),
+            entry_row(
+                "s2", "收入", 2000, "a_invest", category="c_sell",
+                note=tag, created=101,
+            ),
+        ]
+
+        replayed = posting.replay(entries, accounts, holdings)
+
+        self.assertTrue(replayed["tainted"])
+        self.assertIn(
+            "疑似缺少持仓交易行", " ".join(replayed["diagnostics"])
+        )
+        self.assertEqual(replayed["accounts"]["a_invest"], 50000.0)
+        self.assertEqual(replayed["accounts"]["a_bank"], 100000.0)
+        self.assertEqual(replayed["holdings"]["h1"]["shares"], 1000.0)
+
     def test_group_rows_by_tag_and_single_without_tag(self):
         tagged_a = entry_row("e1", "支出", 10, "a1", note="x #G0000beef")
         tagged_b = entry_row("e2", "支出", 20, "a1", note="#G0000beef")
@@ -977,6 +1011,38 @@ class RebuildTest(RebuildFlowTestBase):
         self.entries.append(
             entry_row("e_ghost", "支出", 10, "a_missing", created=300)
         )
+
+        with self.assertRaises(rebuild_flow.TaintedReplay):
+            rebuild_flow.run_rebuild(self.cfg, apply=True)
+
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("update", "delete")],
+            [],
+        )
+
+    def test_rebuild_apply_refuses_when_sell_trade_row_missing(self):
+        # 复现 re-review 场景：当前值恰好是行级求和结果（理财 40000、银行
+        # 112000、份额 1000），apply 绝不能把它们写回去。
+        self.accounts = [
+            account_record("a_bank", "招行工资卡", "银行卡", 100000, 112000),
+            account_record("a_invest", "华泰证券", "理财", 50000, 40000),
+        ]
+        self.holdings = [
+            holding_record(
+                "h1", "贵州茅台", 1000, 10, shares=1000, cost=10
+            )
+        ]
+        tag = " #G0000ca11"
+        self.entries = [
+            entry_row(
+                "s1", "转账", 12000, "a_invest", to="a_bank",
+                note=tag, created=100,
+            ),
+            entry_row(
+                "s2", "收入", 2000, "a_invest", category="c_sell",
+                note=tag, created=101,
+            ),
+        ]
 
         with self.assertRaises(rebuild_flow.TaintedReplay):
             rebuild_flow.run_rebuild(self.cfg, apply=True)
