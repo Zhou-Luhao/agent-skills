@@ -54,6 +54,63 @@ def render_label(key: str) -> str:
     return SUMMARY_LABELS.get(key, key)
 
 
+# Chinese labels for the API contributor keys (sleep / readiness / activity).
+# The report is Chinese; raw snake_case contributor names are an implementation
+# detail, same discipline as SUMMARY_LABELS. Unknown keys fall back to the raw
+# name so a future API addition never crashes the render.
+CONTRIBUTOR_LABELS = {
+    # sleep
+    "deep_sleep": "深睡",
+    "efficiency": "睡眠效率",
+    "latency": "入睡耗时",
+    "rem_sleep": "REM 睡眠",
+    "restfulness": "安稳度",
+    "timing": "睡眠时机",
+    "total_sleep": "总睡眠时长",
+    # readiness
+    "activity_balance": "活动平衡",
+    "body_temperature": "体温",
+    "hrv_balance": "HRV 平衡",
+    "previous_day_activity": "前日活动",
+    "previous_night": "前夜睡眠",
+    "recovery_index": "恢复指数",
+    "resting_heart_rate": "静息心率",
+    "sleep_balance": "睡眠平衡",
+    "sleep_regularity": "睡眠规律性",
+    # activity
+    "meet_daily_targets": "达成每日目标",
+    "move_every_hour": "每小时活动",
+    "recovery_time": "恢复时间",
+    "stay_active": "保持活跃",
+    "training_frequency": "训练频率",
+    "training_volume": "训练量",
+}
+
+# Chinese labels for the internal domain keys in Report["missing_domains"].
+DOMAIN_LABELS = {
+    "sleep": "睡眠评分",
+    "readiness": "准备度",
+    "activity": "活动评分",
+    "spo2": "血氧",
+    "stress": "压力",
+    "resilience": "恢复力",
+    "cardio_age": "心血管年龄",
+    "vo2max": "最大摄氧量",
+    "sleep_time": "就寝建议",
+    "sleep_detail": "睡眠明细",
+}
+
+
+def contributor_label(key: str) -> str:
+    """Human-facing label for an API contributor key."""
+    return CONTRIBUTOR_LABELS.get(key, key)
+
+
+def domain_label(key: str) -> str:
+    """Human-facing label for an internal missing-domain key."""
+    return DOMAIN_LABELS.get(key, key)
+
+
 def summary_value(key: str, value: object) -> str:
     """Format a summary number for display: durations are seconds internally."""
     if value is None:
@@ -698,7 +755,8 @@ def _contributors_panel(report: dict) -> str:
                               ("readiness", "准备度构成", READINESS),
                               ("activity", "活动构成", ACTIVITY)):
         contributors = ((scores.get(key) or {}).get("contributors") or {})
-        body = svg_hbars(list(contributors.items())) if contributors else _na()
+        body = svg_hbars([(contributor_label(name), value)
+                          for name, value in contributors.items()]) if contributors else _na()
         blocks.append('<div class="panel"><div class="cap">'
                       '<span style="color:%s">%s</span><span>0–100</span></div>%s</div>'
                       % (color, esc(title), body))
@@ -766,7 +824,7 @@ def _events_panel(report: dict) -> str:
     missing_domains = report.get("missing_domains") or []
     if missing_domains:
         parts.append('<p class="na">缺失数据域（当日无数据）：%s</p>'
-                     % esc("、".join(missing_domains)))
+                     % esc("、".join(domain_label(d) for d in missing_domains)))
     return "<h2>活动与记录</h2>" + "".join(parts)
 
 

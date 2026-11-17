@@ -11,7 +11,7 @@
 | `monthly --date D` | HTML + MD | `oura-<当月1日>-monthly.html` / `.md` |
 
 - 周报锚点用**所在周的周一**（ISO 周，周一至周日），不是 `--date` 当天
-- 默认输出到系统「下载」目录；`--out DIR` 或 `OURA_REPORT_DIR` 可覆盖
+- 默认输出到系统「下载」目录下的 `oura` 子目录（写入时自动创建）；`--out DIR` 或 `OURA_REPORT_DIR` 可覆盖
 - 命令成功时向 stdout 打印两份产物的**绝对路径**，把路径原样告诉用户
 
 ## HTML 结构

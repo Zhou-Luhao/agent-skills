@@ -97,7 +97,7 @@ TABLE_FIELDS: Dict[str, List[str]] = {
 
 
 def resolve_report_dir(override: Optional[str]) -> Path:
-    """`--out` > OURA_REPORT_DIR > platform downloads > ./reports."""
+    """`--out` > OURA_REPORT_DIR > platform downloads/oura > ./reports."""
     if override:
         return Path(override)
     import os
@@ -121,7 +121,9 @@ def resolve_report_dir(override: Optional[str]) -> Path:
                     candidate = Path(raw.replace("$HOME", str(home)))
                     break
     if candidate.is_dir():
-        return candidate
+        # Keep the downloads root tidy: reports live in their own subfolder
+        # (created on write by _write_report).
+        return candidate / "oura"
     fallback = Path.cwd() / "reports"
     print("提示：找不到系统下载目录，报告将写入 %s（若在仓库内请改用 --out）" % fallback,
           file=sys.stderr)

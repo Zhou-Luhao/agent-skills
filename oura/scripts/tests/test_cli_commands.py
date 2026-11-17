@@ -23,6 +23,13 @@ class ReportDirTest(unittest.TestCase):
         with patch.dict(os.environ, {"OURA_REPORT_DIR": "/tmp/envdir"}):
             self.assertEqual(oura.resolve_report_dir(None), pathlib.Path("/tmp/envdir"))
 
+    def test_default_is_oura_subdir_of_downloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (pathlib.Path(tmp) / "Downloads").mkdir()
+            with patch.dict(os.environ, {"HOME": tmp, "OURA_REPORT_DIR": ""}):
+                self.assertEqual(oura.resolve_report_dir(None),
+                                 pathlib.Path(tmp) / "Downloads" / "oura")
+
 
 class DatasetMapTest(unittest.TestCase):
     def test_fourteen_datasets(self):
