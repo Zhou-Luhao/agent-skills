@@ -35,12 +35,14 @@ def account(name, balance, type_="理财"):
     }
 
 
-def holding(name, shares, cost, breed="股票", status="持有"):
+def holding(
+    name, shares, cost, breed="股票", status="持有", account_id="acc_fund"
+):
     return {
         "持仓名称": name,
         "代码": "sh600519",
         "品种": [breed],
-        "理财账户": [{"id": "acc_fund"}],
+        "理财账户": [{"id": account_id}],
         "当前份额": float(shares),
         "成本价": float(cost),
         "状态": [status],
@@ -52,6 +54,7 @@ class InvestPlanTestBase(unittest.TestCase):
         self.accounts = {
             "acc_bank": account("招行工资卡", 100000.0, "银行卡"),
             "acc_fund": account("华泰证券", 50000.0),
+            "acc_other": account("国泰君安", 0.0),
         }
         self.holdings = {"h1": holding("贵州茅台", 1000, 10)}
 
@@ -306,6 +309,50 @@ class InvestValidationTest(InvestPlanTestBase):
             )
         self.assertIn("转入账户", str(raised.exception))
 
+    def test_account_must_be_investment_type(self):
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.plan_add(
+                self.entry(account="acc_bank", from_account="acc_fund"),
+                self.accounts,
+                self.holdings,
+            )
+        self.assertIn("理财账户", str(raised.exception))
+
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.plan_add(
+                {
+                    "kind": "dividend",
+                    "date": "2026-11-17",
+                    "amount": 500,
+                    "account": "acc_bank",
+                    "pnl_category": "cat_div",
+                },
+                self.accounts,
+                self.holdings,
+            )
+        self.assertIn("理财账户", str(raised.exception))
+
+    def test_holding_must_belong_to_account(self):
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.plan_add(
+                self.entry(account="acc_other", from_account="acc_bank"),
+                self.accounts,
+                self.holdings,
+            )
+
+        message = str(raised.exception)
+        self.assertIn("不属于", message)
+        self.assertIn("acc_other", message)
+
+    def test_buy_rejects_amount_and_shares_together(self):
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.plan_add(
+                self.entry(price=10, shares=1000, amount=10000),
+                self.accounts,
+                self.holdings,
+            )
+        self.assertIn("同时", str(raised.exception))
+
     def test_sell_needs_pnl_category(self):
         with self.assertRaises(posting.PostingError) as raised:
             posting.plan_add(
@@ -401,6 +448,7 @@ class InvestFlowTest(unittest.TestCase):
             flow_category("recC2", "收入·理财收益·基金收益"),
             flow_category("recC3", "收入·理财收益·分红"),
             flow_category("recC4", "收入·其他"),
+            flow_category("recC5", "收入·理财收益·其他"),
         ]
         self.entry_rows = []
         self.calls = []
@@ -623,13 +671,39 @@ class InvestFlowTest(unittest.TestCase):
                     "--account",
                     "华泰证券",
                     "--category",
-                    "收入·其他",
+                    "收入·理财收益·其他",
                 ]
             )
 
         self.assertEqual(code, 0)
         self.assertEqual(err.getvalue(), "")
-        self.assertEqual(self.income_row()["分类"], [{"id": "recC4"}])
+        self.assertEqual(self.income_row()["分类"], [{"id": "recC5"}])
+
+    def test_cli_sell_rejects_non_investment_pnl_category(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--kind",
+                    "invest_sell",
+                    "--holding",
+                    "sh600519",
+                    "--price",
+                    "12",
+                    "--shares",
+                    "1000",
+                    "--to-account",
+                    "招行工资卡",
+                    "--account",
+                    "华泰证券",
+                    "--category",
+                    "收入·其他",
+                ]
+            )
+
+        self.assertEqual(code, 2)
+        self.assertIn("收入·理财收益", err.getvalue())
+        self.assertEqual(self.entry_rows, [])
 
     def test_cli_dividend_income(self):
         with captured_output() as (out, err):
@@ -679,6 +753,159 @@ class InvestFlowTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--to-account", err.getvalue())
         self.assertEqual(self.entry_rows, [])
+
+    def _assert_rejected(self, argv):
+        with captured_output() as (out, err):
+            code = ledger.main(argv)
+        self.assertEqual(code, 2)
+        self.assertEqual(self.entry_rows, [])
+        self.assertEqual(self.calls, [])
+        return err.getvalue()
+
+    def test_cli_expense_rejects_trade_flags(self):
+        message = self._assert_rejected(
+            [
+                "add",
+                "--kind",
+                "expense",
+                "--amount",
+                "5000",
+                "--account",
+                "招行工资卡",
+                "--category",
+                "支出·餐饮·午餐",
+                "--holding",
+                "sh600519",
+                "--price",
+                "12",
+                "--shares",
+                "1000",
+            ]
+        )
+
+        self.assertIn("--holding", message)
+
+    def test_cli_income_rejects_trade_flags(self):
+        message = self._assert_rejected(
+            [
+                "add",
+                "--kind",
+                "income",
+                "--amount",
+                "5000",
+                "--account",
+                "招行工资卡",
+                "--category",
+                "收入·工资",
+                "--holding",
+                "sh600519",
+                "--price",
+                "12",
+                "--shares",
+                "1000",
+            ]
+        )
+
+        self.assertIn("--holding", message)
+
+    def test_cli_transfer_rejects_trade_flags(self):
+        message = self._assert_rejected(
+            [
+                "add",
+                "--kind",
+                "transfer",
+                "--amount",
+                "1000",
+                "--account",
+                "招行工资卡",
+                "--to-account",
+                "现金",
+                "--holding",
+                "sh600519",
+                "--price",
+                "12",
+                "--shares",
+                "1000",
+                "--from-account",
+                "招行工资卡",
+            ]
+        )
+
+        self.assertIn("--holding", message)
+
+    def test_cli_buy_rejects_amount_with_shares(self):
+        message = self._assert_rejected(
+            [
+                "add",
+                "--kind",
+                "invest_buy",
+                "--holding",
+                "sh600519",
+                "--price",
+                "12",
+                "--shares",
+                "1000",
+                "--amount",
+                "12000",
+                "--from-account",
+                "招行工资卡",
+                "--account",
+                "华泰证券",
+            ]
+        )
+
+        self.assertIn("--amount", message)
+        self.assertIn("--shares", message)
+
+    def test_cli_buy_amount_prints_booked_amount(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--kind",
+                    "invest_buy",
+                    "--date",
+                    "2026-11-17",
+                    "--holding",
+                    "000001",
+                    "--price",
+                    "3",
+                    "--amount",
+                    "100",
+                    "--from-account",
+                    "招行工资卡",
+                    "--account",
+                    "华泰证券",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        # 份额 100/3 = 33.33，账面转账金额按 3×33.33 重算为 99.99。
+        self.assertIn("99.99 元", out.getvalue())
+        self.assertEqual(self.entry_rows[0]["fields"]["金额"], 99.99)
+        self.assertEqual(self.entry_rows[1]["fields"]["份额"], 33.33)
+        self.assertEqual(self.account_balance("recA1"), 99900.01)
+
+    def test_cli_dividend_defaults_category(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--kind",
+                    "dividend",
+                    "--date",
+                    "2026-11-17",
+                    "--amount",
+                    "500",
+                    "--account",
+                    "华泰证券",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        self.assertEqual(self.entry_rows[0]["fields"]["分类"], [{"id": "recC3"}])
 
 
 if __name__ == "__main__":

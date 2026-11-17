@@ -156,10 +156,89 @@ def _reject_present(entry: dict, key: str, message: str) -> None:
         raise PostingError(message)
 
 
+INVESTMENT_ACCOUNT_TYPE = "理财"
+
+
 def _number_text(value: float) -> str:
     """份额/价格在报错里的可读形式：整数不带 ".0"，其余保留原值。"""
     text = ("%.4f" % value).rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _select_text(value: Any) -> str:
+    """单选单元格 → 文本；兼容字符串、字符串列表与 [{text/name/id}]。"""
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, (list, tuple)):
+        return ""
+    parts: List[str] = []
+    for item in value:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for key in ("text", "name", "id"):
+                if isinstance(item.get(key), str):
+                    parts.append(item[key])
+                    break
+    return "、".join(parts)
+
+
+def _require_investment_account(
+    account_id: str, accounts: Dict[str, dict]
+) -> None:
+    """买卖/分红必须落在「类型=理财」的账户上，否则资金口径会被记错账户。"""
+    fields = accounts.get(account_id)
+    type_text = _select_text(fields.get("类型") if isinstance(fields, dict) else None)
+    types = [part.strip() for part in type_text.split("、") if part.strip()]
+    if INVESTMENT_ACCOUNT_TYPE not in types:
+        raise PostingError(
+            "账户「%s」的类型是「%s」，不是理财账户；理财买卖/分红必须使用"
+            "「类型=理财」的账户（先用 `ledger.py account list` 查看）"
+            % (_account_label(account_id, accounts), type_text or "未填写")
+        )
+
+
+def _holding_account_ids(holding_id: str, holdings: Dict[str, dict]) -> List[str]:
+    """持仓「理财账户」关联单元格 → record_id 列表。"""
+    fields = holdings.get(holding_id)
+    value = fields.get("理财账户") if isinstance(fields, dict) else None
+    items = value if isinstance(value, (list, tuple)) else [value]
+    ids: List[str] = []
+    for item in items:
+        raw = item.get("id") if isinstance(item, dict) else item
+        if isinstance(raw, str) and raw.strip():
+            ids.append(raw.strip())
+    return ids
+
+
+def _require_holding_owner(
+    holding_id: str,
+    account_id: str,
+    accounts: Dict[str, dict],
+    holdings: Dict[str, dict],
+) -> None:
+    """持仓必须属于当前理财账户，避免把买入记到别的账户、污染资产快照。"""
+    owners = _holding_account_ids(holding_id, holdings)
+    if not owners:
+        raise PostingError(
+            "持仓「%s」没有关联理财账户（理财账户字段为空）；"
+            "请先用 `ledger.py holding edit` 关联账户"
+            % _holding_label(holding_id, holdings)
+        )
+    if account_id not in owners:
+        owner_labels = "、".join(
+            _account_label(owner, accounts) if owner in accounts else owner
+            for owner in owners
+        )
+        raise PostingError(
+            "持仓「%s」不属于理财账户「%s」：它关联的是「%s」；"
+            "请使用持仓所属的理财账户记账"
+            % (
+                _holding_label(holding_id, holdings),
+                _account_label(account_id, accounts),
+                owner_labels,
+            )
+        )
 
 
 def shares_from_amount(amount: float, price: float) -> float:
@@ -211,6 +290,11 @@ def _invest_amount(entry: dict) -> float:
     """理财买卖金额 = round(成交价 × 份额, 2)。"""
     kind = _kind(entry)
     return round(_price(entry) * _shares(entry, kind), 2)
+
+
+def trade_amount(entry: dict) -> float:
+    """理财买卖的成交金额（价格×份额，round 2）；CLI 展示与记账共用。"""
+    return _invest_amount(entry)
 
 
 def _amount_for(kind: str, entry: dict) -> float:
@@ -319,9 +403,16 @@ def _validate_invest_buy(
     holdings: Dict[str, dict] = None,
 ) -> None:
     """理财买入：价格/份额/持仓/转出账户齐全；理财账户只作为买入目的地。"""
+    _require_investment_account(account, accounts)
+    if _present(entry.get("amount")) and _present(entry.get("shares")):
+        raise PostingError(
+            "理财买入不能同时指定金额（amount）与份额（shares）：请二选一；"
+            "转账金额由脚本按 成交价×份额 重算"
+        )
     _price(entry)
     _shares(entry, kind)
-    _holding_id(entry, holdings)
+    holding_id = _holding_id(entry, holdings)
+    _require_holding_owner(holding_id, account, accounts, holdings)
     source = _account_id(entry, "from_account", "转出账户", accounts)
     if source == account:
         raise PostingError(
@@ -356,9 +447,11 @@ def _validate_invest_sell(
     holdings: Dict[str, dict] = None,
 ) -> None:
     """理财卖出：持仓/价格/份额/转入账户/盈亏分类齐全，且份额不得超过持有。"""
+    _require_investment_account(account, accounts)
     _price(entry)
     shares = _shares(entry, kind)
     holding_id = _holding_id(entry, holdings)
+    _require_holding_owner(holding_id, account, accounts, holdings)
     target = _account_id(entry, "to_account", "转入账户", accounts)
     if target == account:
         raise PostingError(
@@ -398,7 +491,8 @@ def _validate_dividend(
     account: str,
     holdings: Dict[str, dict] = None,
 ) -> None:
-    """理财分红：金额已在 validate_entry 校验，这里要求收入分类且不带买卖字段。"""
+    """理财分红：金额已在 validate_entry 校验，这里要求理财账户、收入分类且不带买卖字段。"""
+    _require_investment_account(account, accounts)
     category = entry.get("pnl_category")
     if not isinstance(category, str) or not category.strip():
         raise PostingError(
@@ -522,10 +616,10 @@ def _plan_cash(
     account: str,
     amount: float,
     holdings: Dict[str, dict] = None,
-) -> Dict[str, Any]:
+) -> List[Tuple[str, Dict[str, Any]]]:
     fields = _detail_fields(kind, entry, account, amount)
     fields["分类"] = [{"id": entry["category"].strip()}]
-    return fields
+    return [(ENTRY_TABLE, fields)]
 
 
 def _plan_transfer(
@@ -535,11 +629,11 @@ def _plan_transfer(
     account: str,
     amount: float,
     holdings: Dict[str, dict] = None,
-) -> Dict[str, Any]:
+) -> List[Tuple[str, Dict[str, Any]]]:
     fields = _detail_fields(kind, entry, account, amount)
     target = _account_id(entry, "to_account", "转入账户", accounts)
     fields["转入账户"] = [{"id": target}]
-    return fields
+    return [(ENTRY_TABLE, fields)]
 
 
 def _trade_detail(
@@ -632,7 +726,7 @@ def _plan_dividend(
     return [(ENTRY_TABLE, fields)]
 
 
-PLANNERS: Dict[str, Callable[..., Any]] = {
+PLANNERS: Dict[str, Callable[..., List[Tuple[str, Dict[str, Any]]]]] = {
     "income": _plan_cash,
     "expense": _plan_cash,
     "transfer": _plan_transfer,
@@ -691,11 +785,8 @@ def plan_add(
     kind = _kind(entry)
     amount = _amount_for(kind, entry)
     account = _account_id(entry, "account", "账户", accounts)
-    planned = PLANNERS[kind](kind, entry, accounts, account, amount, holdings)
-    creates = (
-        [(ENTRY_TABLE, planned)]
-        if isinstance(planned, dict)
-        else list(planned)
+    creates = list(
+        PLANNERS[kind](kind, entry, accounts, account, amount, holdings)
     )
 
     updates: List[Tuple[str, str, dict]] = []

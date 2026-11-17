@@ -172,7 +172,11 @@ def _add_holding_parsers(subparsers) -> None:
 
 def _add_add_parser(subparsers) -> None:
     add = subparsers.add_parser(
-        "add", help="记一笔收入/支出/转账（明细 + 账户余额联动）"
+        "add",
+        help=(
+            "记一笔收入/支出/转账/理财买卖/分红"
+            "（明细 + 账户余额/持仓联动）"
+        ),
     )
     add.add_argument(
         "--kind",
@@ -194,7 +198,8 @@ def _add_add_parser(subparsers) -> None:
         type=float,
         help=(
             "金额必须大于 0（方向由 --kind 或分类类型决定，不看金额符号）；"
-            "收入/支出/分红必填，理财买入可用金额代替 --shares"
+            "收入/支出/分红必填。理财买入可用 --amount 按 --price 换算份额，"
+            "脚本会按 价格×份额 重算转账金额；不要与 --shares 同用"
         ),
     )
     add.add_argument("--account", required=True, help="账户名称或 record_id")
@@ -205,8 +210,9 @@ def _add_add_parser(subparsers) -> None:
         "--category",
         default=None,
         help=(
-            "分类全名，如 支出·餐饮·午餐（收入/支出/分红必填；"
-            "理财卖出可选，缺省按品种自动路由盈亏分类）"
+            "分类全名，如 支出·餐饮·午餐（收入/支出必填；"
+            "理财卖出可选，缺省按品种路由到「收入·理财收益」下；"
+            "分红缺省为 收入·理财收益·分红）"
         ),
     )
     add.add_argument(
@@ -272,6 +278,40 @@ def _usage_error(message: str) -> int:
 
 _AUTO_AMBIGUOUS = "方向不明确，请用 --kind income|expense 指定"
 
+# kind → 不允许出现的开关。宁可报错，也不静默丢弃用户给的交易参数。
+_FORBIDDEN_ADD_FLAGS = {
+    "transfer": ("holding", "price", "shares", "from_account", "category"),
+    "income": ("to_account", "from_account", "holding", "price", "shares"),
+    "expense": ("to_account", "from_account", "holding", "price", "shares"),
+    "invest_buy": ("to_account", "category"),
+    "invest_sell": ("amount", "from_account"),
+    "dividend": ("to_account", "from_account", "holding", "price", "shares"),
+}
+_ADD_FLAG_LABELS = {
+    "amount": "--amount",
+    "to_account": "--to-account",
+    "category": "--category",
+    "holding": "--holding",
+    "price": "--price",
+    "shares": "--shares",
+    "from_account": "--from-account",
+}
+
+
+def _reject_forbidden_add_flags(
+    args: argparse.Namespace, kind: str
+) -> Optional[int]:
+    for attribute in _FORBIDDEN_ADD_FLAGS.get(kind, ()):
+        if getattr(args, attribute) is not None:
+            return _usage_error(
+                "%s不需要 %s；请去掉该参数，或确认记账类型"
+                % (
+                    posting.KIND_LABELS[kind],
+                    _ADD_FLAG_LABELS[attribute],
+                )
+            )
+    return None
+
 
 def _run_add(args: argparse.Namespace) -> int:
     cfg = None
@@ -295,24 +335,19 @@ def _run_add(args: argparse.Namespace) -> int:
     else:
         kind = args.kind
 
+    rejected = _reject_forbidden_add_flags(args, kind)
+    if rejected is not None:
+        return rejected
+
     if kind == "transfer":
         if args.amount is None:
             return _usage_error("转账必须指定 --amount（金额必须大于 0）")
         if args.to_account is None:
             return _usage_error("转账必须指定 --to-account（转入账户）")
-        if args.category is not None:
-            return _usage_error(
-                "转账不需要 --category：分类只用于收入/支出"
-            )
     elif kind in ("income", "expense"):
         if args.amount is None:
             return _usage_error(
                 "%s必须指定 --amount（金额必须大于 0）"
-                % posting.KIND_LABELS[kind]
-            )
-        if args.to_account is not None:
-            return _usage_error(
-                "%s不需要 --to-account：只有转账才有转入账户"
                 % posting.KIND_LABELS[kind]
             )
         if args.category is None:
@@ -325,16 +360,17 @@ def _run_add(args: argparse.Namespace) -> int:
             return _usage_error("理财买入必须指定 --holding（持仓代码/名称）")
         if args.price is None:
             return _usage_error("理财买入必须指定 --price（成交价/净值）")
+        if args.from_account is None:
+            return _usage_error("理财买入必须指定 --from-account（转出账户）")
+        if args.amount is not None and args.shares is not None:
+            return _usage_error(
+                "理财买入不能同时指定 --amount 与 --shares：请二选一；"
+                "转账金额由脚本按 价格×份额 重算"
+            )
         if args.shares is None and args.amount is None:
             return _usage_error(
                 "理财买入必须指定 --shares（份额）或用 --amount 按净值换算"
             )
-        if args.from_account is None:
-            return _usage_error("理财买入必须指定 --from-account（转出账户）")
-        if args.to_account is not None:
-            return _usage_error("理财买入不需要 --to-account：份额买入由脚本记录")
-        if args.category is not None:
-            return _usage_error("理财买入不需要 --category：买卖明细类型固定为转账")
     elif kind == "invest_sell":
         if args.holding is None:
             return _usage_error("理财卖出必须指定 --holding（持仓代码/名称）")
@@ -344,32 +380,9 @@ def _run_add(args: argparse.Namespace) -> int:
             return _usage_error("理财卖出必须指定 --shares（卖出份额）")
         if args.to_account is None:
             return _usage_error("理财卖出必须指定 --to-account（转入账户）")
-        if args.amount is not None:
-            return _usage_error(
-                "理财卖出不需要 --amount：到账金额由脚本按 成交价×份额 计算"
-            )
-        if args.from_account is not None:
-            return _usage_error(
-                "理财卖出不需要 --from-account：资金从理财账户转出"
-            )
     elif kind == "dividend":
         if args.amount is None:
             return _usage_error("理财分红必须指定 --amount（分红金额）")
-        if args.category is None:
-            return _usage_error(
-                "理财分红必须指定 --category，例如 收入·理财收益·分红"
-            )
-        if (
-            args.holding is not None
-            or args.price is not None
-            or args.shares is not None
-            or args.from_account is not None
-            or args.to_account is not None
-        ):
-            return _usage_error(
-                "理财分红只需要 --amount/--account/--category："
-                "买卖字段请用于 --kind invest_buy|invest_sell"
-            )
 
     entry = {
         "kind": kind,
@@ -401,18 +414,16 @@ def _run_add(args: argparse.Namespace) -> int:
             entry["category"] = args.category
     elif kind == "dividend":
         entry["amount"] = args.amount
-        entry["category"] = args.category
+        entry["category"] = args.category or "收入·理财收益·分红"
 
     if cfg is None:
         cfg = config.load_config()
     result = add_flow.execute(cfg, entry)
-    display_amount = args.amount
-    if (
-        kind in posting.INVEST_KINDS
-        and args.price is not None
-        and args.shares is not None
-    ):
-        display_amount = args.price * args.shares
+    display_amount = (
+        posting.trade_amount(entry)
+        if kind in posting.INVEST_KINDS
+        else args.amount
+    )
     print(
         "已记账：%s %.2f 元 · 账户 %s（日期 %s，明细 %s，更新 %d 项）"
         % (

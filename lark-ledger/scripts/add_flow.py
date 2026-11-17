@@ -289,20 +289,38 @@ def _resolve_holding_snapshot(
     return record_id, {record_id: holding["fields"]}
 
 
+_PNL_CATEGORY_PREFIX = "收入·理财收益"
+
+
 def _resolve_pnl_category(
     cfg: dict, entry: dict, holding_fields: Dict[str, Any]
 ) -> str:
-    """卖出按持仓品种路由盈亏分类；用户显式给 --category 时以用户为准。"""
+    """卖出按持仓品种路由盈亏分类；显式 --category 只能限定在理财收益下。"""
     category_ref = entry.get("category")
-    if not _present(category_ref):
+    if _present(category_ref):
+        record = _resolve_category_record(cfg, category_ref)
+        full_name = _cell_text(record["fields"].get("分类")).strip()
+        if not full_name.startswith(_PNL_CATEGORY_PREFIX):
+            raise posting.PostingError(
+                "理财卖出的盈亏分类必须属于「%s」：收到「%s」；"
+                "脚本按持仓品种自动路由（股票→%s，基金→%s）"
+                % (
+                    _PNL_CATEGORY_PREFIX,
+                    full_name,
+                    _PNL_CATEGORIES["股票"],
+                    _PNL_CATEGORIES["基金"],
+                )
+            )
+    else:
         breed = _cell_text(holding_fields.get("品种")).strip()
         category_ref = _PNL_CATEGORIES.get(breed)
         if category_ref is None:
             raise posting.PostingError(
                 "无法按持仓品种确定已实现盈亏分类：品种「%s」；"
-                "请用 --category 显式指定收入分类" % (breed or "未填写")
+                "请用 --category 显式指定「%s」下的分类"
+                % (breed or "未填写", _PNL_CATEGORY_PREFIX)
             )
-    record = _resolve_category_record(cfg, category_ref)
+        record = _resolve_category_record(cfg, category_ref)
     _check_category_direction("income", record, category_ref)
     return record["record_id"]
 
