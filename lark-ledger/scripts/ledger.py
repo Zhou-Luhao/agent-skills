@@ -2,11 +2,13 @@
 
 退出码约定：0 成功 / 2 参数错误 / 3 未配置或未登录 / 4 lark-cli 调用失败 / 5 数据错误。
 已实现 init（建账本）、add（记一笔）、edit / delete / rebuild（修正与重算）、
-quotes（行情回补）、snapshot（资产快照）与 account / holding 主数据子命令。
+quotes（行情回补）、snapshot（资产快照）、account / holding 主数据子命令，
+以及 report（周报/月报）与 query（余额/收支/持仓查询）。
 """
 
 import argparse
 import datetime
+import json
 import sys
 import unicodedata
 from typing import Any, List, Optional
@@ -19,6 +21,7 @@ import master_data
 import posting
 import quotes_flow
 import rebuild_flow
+import report_flow
 import snapshot_flow
 
 EXIT_OK = 0
@@ -313,6 +316,76 @@ def _add_snapshot_parser(subparsers) -> None:
     )
 
 
+def _date_arg(value: str) -> str:
+    """argparse 日期参数：非法格式在解析阶段返回退出码 2。"""
+    text = value.strip()
+    if not snapshot_flow.DATE_PATTERN.fullmatch(text):
+        raise argparse.ArgumentTypeError(
+            "必须是 YYYY-MM-DD，实际是「%s」" % value
+        )
+    try:
+        datetime.date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("不是有效日期：「%s」" % value)
+    return text
+
+
+def _add_report_parser(subparsers) -> None:
+    report = subparsers.add_parser(
+        "report", help="生成周报/月报（自包含 HTML + Markdown）"
+    )
+    report.add_argument(
+        "--period",
+        required=True,
+        choices=report_flow.PERIODS,
+        help="报告期间：%(choices)s",
+    )
+    report.add_argument(
+        "--date",
+        default=None,
+        type=_date_arg,
+        help="锚点日期 YYYY-MM-DD（默认：今天，UTC+8）",
+    )
+    report.add_argument(
+        "--out",
+        default=None,
+        help="输出目录（默认：~/Downloads/lark-ledger）",
+    )
+
+
+def _add_query_parser(subparsers) -> None:
+    query = subparsers.add_parser(
+        "query", help="查询账户余额、区间收支或持仓市值"
+    )
+    query.add_argument(
+        "what",
+        choices=report_flow.QUERY_WHAT,
+        help="查询内容：%(choices)s",
+    )
+    query.add_argument(
+        "--start",
+        default=None,
+        type=_date_arg,
+        help="统计开始日期 YYYY-MM-DD（summary 用）",
+    )
+    query.add_argument(
+        "--end",
+        default=None,
+        type=_date_arg,
+        help="统计结束日期 YYYY-MM-DD（summary 用）",
+    )
+    query.add_argument(
+        "--category",
+        default=None,
+        help="只统计一个分类（一级、二级或「一级·二级」）",
+    )
+    query.add_argument(
+        "--json",
+        action="store_true",
+        help="输出原始 JSON dict，便于后续处理",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ledger.py",
@@ -340,6 +413,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_rebuild_parser(subparsers)
     _add_quotes_parser(subparsers)
     _add_snapshot_parser(subparsers)
+    _add_report_parser(subparsers)
+    _add_query_parser(subparsers)
     _add_account_parsers(subparsers)
     _add_holding_parsers(subparsers)
     return parser
@@ -859,6 +934,104 @@ def _run_snapshot(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _money_text(value: Any) -> str:
+    """金额展示：固定两位小数，与报告的金钱格式一致。"""
+    return "%.2f" % float(value)
+
+
+def _qty_text(value: Any) -> str:
+    """份额/价格展示：最多 4 位小数，去掉末尾 0（与报告一致）。"""
+    rounded = round(float(value), 4)
+    if rounded == 0:
+        rounded = 0.0
+    return ("%.4f" % rounded).rstrip("0").rstrip(".")
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    result = report_flow.run_report(
+        cfg, args.period, args.date, args.out
+    )
+    print("报告已生成：")
+    print("  HTML：%s" % result["html"])
+    print("  Markdown：%s" % result["md"])
+    return EXIT_OK
+
+
+def _run_query(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    result = report_flow.run_query(
+        cfg, args.what, args.start, args.end, args.category
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return EXIT_OK
+
+    if result["what"] == "balances":
+        rows = [
+            [row["名称"], row["类型"], _money_text(row["余额"])]
+            for row in result["balances"]
+        ]
+        print(_format_table(("账户", "类型", "当前余额（元）"), rows))
+        print("合计：%s 元" % _money_text(result["total"]))
+        return EXIT_OK
+
+    if result["what"] == "holdings":
+        rows = [
+            [
+                row["名称"],
+                row["代码"],
+                _qty_text(row["份额"]),
+                _qty_text(row["最新价"]),
+                _money_text(row["市值"]),
+                _money_text(row["浮盈"]),
+            ]
+            for row in result["holdings"]
+        ]
+        print(
+            _format_table(
+                ("名称", "代码", "份额", "最新价", "市值（元）", "浮盈（元）"),
+                rows,
+            )
+        )
+        print("持仓市值合计：%s 元" % _money_text(result["total"]))
+        return EXIT_OK
+
+    print("区间：%s ~ %s" % (result["start"], result["end"]))
+    if result.get("category"):
+        print("分类：%s" % result["category"])
+    print(
+        _format_table(
+            ("指标", "金额（元）"),
+            [
+                ["收入", _money_text(result["income"])],
+                ["支出", _money_text(result["expense"])],
+                ["结余", _money_text(result["net"])],
+            ],
+        )
+    )
+    for key, title in (
+        ("by_category", "支出分类"),
+        ("income_by_category", "收入分类"),
+    ):
+        print("")
+        print("%s：" % title)
+        print(
+            _format_table(
+                ("一级", "二级", "金额（元）"),
+                [
+                    [
+                        row["一级"] or "未分类",
+                        row["二级"] or "—",
+                        _money_text(row["金额"]),
+                    ]
+                    for row in result.get(key) or []
+                ],
+            )
+        )
+    return EXIT_OK
+
+
 def _run_account(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     if args.action == "add":
@@ -960,6 +1133,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_quotes(args)
         if args.command == "snapshot":
             return _run_snapshot(args)
+        if args.command == "report":
+            return _run_report(args)
+        if args.command == "query":
+            return _run_query(args)
         if args.command == "account":
             return _run_account(args)
         if args.command == "holding":
@@ -999,6 +1176,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("数据错误：%s" % exc, file=sys.stderr)
         return EXIT_DATA
     except snapshot_flow.SnapshotError as exc:
+        print("数据错误：%s" % exc, file=sys.stderr)
+        return EXIT_DATA
+    except report_flow.ReportError as exc:
         print("数据错误：%s" % exc, file=sys.stderr)
         return EXIT_DATA
     except init_flow.InitError as exc:
