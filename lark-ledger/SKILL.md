@@ -42,10 +42,10 @@ python3 scripts/ledger.py <子命令> [参数]
 | 改一条明细（金额/日期/账户/分类/备注） | `edit <record_id> --字段 新值`，脚本联动重算余额/持仓 | `references/commands.md` |
 | 删一条明细（或一整组） | `delete <record_id>`；同组超过 1 行需用户确认后加 `--yes` | `references/commands.md` |
 | 手机端手工改过金额/账户/日期/删行，要求“重算一下” | `rebuild` 看差异 → 用户确认 → `rebuild --apply` | `references/commands.md` |
-| 新增账户、改期初/利率、销户 | `account add|edit|list|close` | `references/commands.md` |
-| 新增持仓、改份额/成本/所属理财账户 | `holding add|edit|list` | `references/commands.md` |
-| 查余额、某段时间收支、按分类统计、持仓市值 | `query balances|summary|holdings`（支持 `--json`） | `references/commands.md` |
-| 生成周报 / 月报 | `report --period week|month [--date] [--out]`，把产物路径告诉用户 | `references/commands.md` |
+| 新增账户、改期初/利率、销户 | `account add / edit / list / close` | `references/commands.md` |
+| 新增持仓、改份额/成本/所属理财账户 | `holding add / edit / list` | `references/commands.md` |
+| 查余额、某段时间收支、按分类统计、持仓市值 | `query balances / summary / holdings`（支持 `--json`） | `references/commands.md` |
+| 生成周报 / 月报 | `report --period week / month [--date] [--out]`，把产物路径告诉用户 | `references/commands.md` |
 | 手动更新行情（不等 15:05 或当天已跑过） | `quotes --force` | `references/quotes.md` |
 | 盘点资产 / 补一份快照 | `snapshot [--date YYYY-MM-DD]` | `references/commands.md` |
 | 查字段含义、净值口径、期初/状态字段 | 按需加载 | `references/data-model.md` |

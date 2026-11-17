@@ -69,7 +69,7 @@ python3 scripts/ledger.py add --account ACCOUNT [--kind KIND] [--amount F]
 
 1. 传了 `--to-account` → 视为 `transfer`；此时再传 `--category` 会被拒绝（转账不分分类）。
 2. 没传 `--to-account` → 必须传 `--category`。脚本按分类主字段实时查表，读它的「类型」：`收入 → income`，`支出 → expense`。
-3. 分类缺失、类型为空、分类不存在/重名 → 退出码 2，提示显式指定 `--kind income|expense`。
+3. 分类不存在/重名 → 退出码 2，提示先在《分类》表添加该分类或消除重名（脚本不会自动创建）。分类缺失或分类「类型」为空 → 退出码 2，提示补 `--category`，或用 `--kind income|expense` 显式指定方向。
 4. **绝不按金额正负猜方向**：金额本身必须 > 0，符号不参与判断。
 5. 理财申购/赎回、分红、贷款还款不会由 `auto` 推断，请显式传对应的 `--kind`（赎回/还贷还要传 `--holding`/`--loan-account` 等）。
 
@@ -127,7 +127,7 @@ python3 scripts/ledger.py edit RECORD_ID [--amount F] [--date YYYY-MM-DD]
 已修改明细 recXXXX：变更 金额、备注；重算更新 1 项
 ```
 
-有诊断时先逐行打印 `诊断：…`。退出码：0 · 2 参数/分类方向/无修改项 · 3 未配置 · 4 部分写入失败 · 5 重放不可信、账户/持仓不存在。
+有诊断时先逐行打印 `诊断：…`。退出码：0 · 2 参数/分类方向/无修改项、明细 record_id 不存在 · 3 未配置 · 4 部分写入失败 · 5 重放不可信、账户/持仓不存在。
 
 ## `delete`
 
@@ -148,7 +148,7 @@ python3 scripts/ledger.py delete RECORD_ID [--yes]
 已删除 2 条明细：recA、recB；重算更新 2 项
 ```
 
-退出码：0 · 2 多行组缺 `--yes`/参数错误 · 3 未配置 · 4 部分写入失败 · 5 重放不可信或明细不存在。
+退出码：0 · 2 多行组缺 `--yes`、明细 record_id 不存在或参数错误 · 3 未配置 · 4 部分写入失败 · 5 重放不可信。
 
 ## `rebuild`
 
@@ -228,7 +228,7 @@ python3 scripts/ledger.py report --period week|month [--date YYYY-MM-DD] [--out 
   Markdown：/Users/<你>/Downloads/lark-ledger/ledger-month-2026-11-30.md
 ```
 
-文件名是 `ledger-<week|month>-<期间结束日>`。报告内容：收支总览（**排除转账**，含贷款利息、赎回已实现盈亏与分红）、支出/收入按分类、净资产曲线（来自资产快照 + 当天实时末点）、持仓市值/浮盈、负债概览。HTML 自包含（内联 CSS/SVG、零外链、无 JS），离线可开。
+文件名是 `ledger-<week|month>-<期间结束日>`。报告内容：收支总览（**排除转账**，含贷款利息、赎回已实现盈亏与分红）、支出/收入按分类、净资产曲线（来自资产快照；报告期间包含今天时补当天实时末点）、持仓市值/浮盈、负债概览。HTML 自包含（内联 CSS/SVG、零外链、无 JS），离线可开。
 
 退出码：0 · 2 日期/期间参数错误 · 3 未配置 · 4 飞书读取失败 · 5 聚合/写文件失败。
 
