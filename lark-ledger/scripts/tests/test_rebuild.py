@@ -69,6 +69,7 @@ def holding_record(
     account_id="a_invest",
     code="sh600519",
     breed="股票",
+    status="持有",
 ):
     return {
         "record_id": record_id,
@@ -83,7 +84,7 @@ def holding_record(
             "成本价": float(opening_cost if cost is None else cost),
             "期初份额": float(opening_shares),
             "期初成本": float(opening_cost),
-            "状态": ["持有"],
+            "状态": [status],
         },
     }
 
@@ -135,7 +136,7 @@ def diff_item(diff, field, object_contains):
 
 
 # ---------------------------------------------------------------------------
-# 纯逻辑：replay / plan_delete
+# 纯逻辑：replay
 # ---------------------------------------------------------------------------
 
 
@@ -202,7 +203,8 @@ class ReplayTest(unittest.TestCase):
         replayed = posting.replay(entries, accounts, holdings)
 
         self.assertEqual(
-            replayed["holdings"]["h1"], {"shares": 1500.0, "cost": 10.6667}
+            replayed["holdings"]["h1"],
+            {"shares": 1500.0, "cost": 10.6667, "status": "持有"},
         )
         # 买入现金：银行卡 −6000；理财账户「当前余额」是账户内闲置现金，
         # 买入不改变它（钱进了持仓）。行级求和会错算成 56000，这里必须 50000。
@@ -474,6 +476,35 @@ class ReplayTest(unittest.TestCase):
                             )
                 self.assertEqual(replayed["diagnostics"], [])
 
+    def test_replay_missing_trade_account_taints(self):
+        accounts = {
+            "a_bank": account_record(
+                "a_bank", "招行", "银行卡", 100000
+            )["fields"],
+        }
+        holdings = {"h1": holding_record("h1", "茅台", 1000, 10)["fields"]}
+        tag = " #G0000ab12"
+        entries = [
+            entry_row(
+                "e1", "转账", 6000, "a_bank", to="a_missing",
+                note=tag, created=100,
+            ),
+            entry_row(
+                "e2", "转账", 6000, "a_missing", to="a_missing",
+                holding="h1", price=12, shares=500,
+                note=tag, created=101,
+            ),
+        ]
+
+        replayed = posting.replay(entries, accounts, holdings)
+
+        self.assertTrue(replayed["tainted"])
+        self.assertIn("a_missing", " ".join(replayed["diagnostics"]))
+        # 账户缺失时持仓不能被静默更新。
+        self.assertEqual(
+            replayed["holdings"]["h1"]["shares"], 1000.0
+        )
+
     def test_group_rows_by_tag_and_single_without_tag(self):
         tagged_a = entry_row("e1", "支出", 10, "a1", note="x #G0000beef")
         tagged_b = entry_row("e2", "支出", 20, "a1", note="#G0000beef")
@@ -492,63 +523,6 @@ class ReplayTest(unittest.TestCase):
             [row["record_id"] for row in posting.group_rows([tagged_a, plain], plain)],
             ["e3"],
         )
-
-    def test_plan_delete_reverses_expense(self):
-        accounts = {"a1": account_record("a1", "现金", "现金", 1000, 965)["fields"]}
-        group = [entry_row("e1", "支出", 35, "a1")]
-
-        plan = posting.plan_delete(group, accounts, {})
-
-        self.assertEqual(plan["delete"], ["e1"])
-        self.assertEqual(
-            [item for item in plan["update"] if item[0] == "账户"],
-            [("账户", "a1", {"当前余额": 1000.0})],
-        )
-
-    def test_plan_delete_restores_holding_cost(self):
-        accounts = {
-            "a_bank": account_record("a_bank", "招行", "银行卡", 100000, 94000)["fields"],
-            "a_invest": account_record("a_invest", "华泰", "理财", 50000, 50000)["fields"],
-        }
-        holdings = {
-            "h1": holding_record("h1", "茅台", 1000, 10, shares=1500, cost=10.6667)["fields"]
-        }
-        tag = " #G0000abcd"
-        group = [
-            entry_row(
-                "e1", "转账", 6000, "a_bank", to="a_invest",
-                note=tag, created=100,
-            ),
-            entry_row(
-                "e2", "转账", 6000, "a_invest", to="a_invest",
-                holding="h1", price=12, shares=500,
-                note=tag, created=101,
-            ),
-        ]
-
-        plan = posting.plan_delete(group, accounts, holdings)
-
-        self.assertEqual(plan["delete"], ["e1", "e2"])
-        # 理财账户闲置现金不因买卖变化：只有银行卡回到 100000。
-        account_updates = [
-            item for item in plan["update"] if item[0] == "账户"
-        ]
-        self.assertEqual(
-            account_updates,
-            [("账户", "a_bank", {"当前余额": 100000.0})],
-        )
-        holding_updates = [
-            item for item in plan["update"] if item[0] == "持仓"
-        ]
-        self.assertEqual(len(holding_updates), 1)
-        self.assertEqual(holding_updates[0][1], "h1")
-        self.assertEqual(holding_updates[0][2]["当前份额"], 1000.0)
-        # 反向加权成本由已 round 4 的当前值反推，允许 1e-3 的舍入差；
-        # delete/rebuild 流程用 replay 的绝对值，不受此影响。
-        self.assertAlmostEqual(
-            holding_updates[0][2]["成本价"], 10.0, delta=0.001
-        )
-
 
 # ---------------------------------------------------------------------------
 # 流程级：rebuild / delete / edit（mock 全部 I/O）
@@ -608,7 +582,9 @@ class RebuildFlowTestBase(unittest.TestCase):
         for patcher in reversed(self._patches):
             patcher.stop()
 
-    def _search(self, app_token, table_id, conditions=None, limit=2000):
+    def _search(
+        self, app_token, table_id, conditions=None, limit=2000, offset=0
+    ):
         self.searches.append(table_id)
         if table_id == "tbl_account":
             records = self.accounts
@@ -620,7 +596,10 @@ class RebuildFlowTestBase(unittest.TestCase):
             records = self.entries
         else:
             self.fail("不应搜索表 %s" % table_id)
-        return [copy.deepcopy(item) for item in records[:limit]]
+        return [
+            copy.deepcopy(item)
+            for item in records[offset : offset + limit]
+        ]
 
     def _update(self, app_token, table_id, updates):
         self.calls.append(("update", table_id, copy.deepcopy(updates)))
@@ -734,27 +713,31 @@ class RebuildFlowTestBase(unittest.TestCase):
         ]
 
     def sell_scenario(self):
-        """卖出 500 股 @12：三条明细同组（转账 + 已实现盈亏 + 自转）。"""
+        """清仓卖出 1000 股 @12：三条明细同组（转账 + 已实现盈亏 + 自转）。"""
         self.accounts = [
-            account_record("a_bank", "招行工资卡", "银行卡", 100000, 106000),
+            account_record("a_bank", "招行工资卡", "银行卡", 100000, 112000),
+            # 理财账户「当前余额」是闲置现金，卖出不改变它。
             account_record("a_invest", "华泰证券", "理财", 50000, 50000),
         ]
         self.holdings = [
-            holding_record("h1", "贵州茅台", 1000, 10, shares=500, cost=10)
+            holding_record(
+                "h1", "贵州茅台", 1000, 10, shares=0, cost=10,
+                status="已清仓",
+            )
         ]
         tag = " #G0000c0de"
         self.entries = [
             entry_row(
-                "e_transfer", "转账", 6000, "a_invest", to="a_bank",
+                "e_transfer", "转账", 12000, "a_invest", to="a_bank",
                 note=tag, created=100,
             ),
             entry_row(
-                "e_pnl", "收入", 1000, "a_invest",
+                "e_pnl", "收入", 2000, "a_invest",
                 category="c_sell", note=tag, created=101,
             ),
             entry_row(
-                "e_trade", "转账", 6000, "a_invest", to="a_invest",
-                holding="h1", price=12, shares=500,
+                "e_trade", "转账", 12000, "a_invest", to="a_invest",
+                holding="h1", price=12, shares=1000,
                 note=tag, created=102,
             ),
         ]
@@ -843,18 +826,59 @@ class RebuildTest(RebuildFlowTestBase):
         self.assertEqual(item["现值"], 11.0)
         self.assertEqual(item["应为"], 10.6667)
 
-    def test_rebuild_never_writes_formula_or_status_fields(self):
+    def test_rebuild_writes_only_share_cost_status_fields(self):
         self.invest_scenario()
         self.record(self.holdings, "h1")["fields"]["当前份额"] = 999.0
+        self.record(self.holdings, "h1")["fields"]["状态"] = ["已清仓"]
         self.record(self.accounts, "a_bank")["fields"]["当前余额"] = 1.0
 
         rebuild_flow.run_rebuild(self.cfg, apply=True)
 
-        allowed = {"当前余额", "当前份额", "成本价"}
-        for update in self.updates_to("tbl_holding"):
-            self.assertLessEqual(set(update["h1"]), allowed)
+        allowed = {"当前余额", "当前份额", "成本价", "状态"}
+        holding_update = self.update_fields("tbl_holding", "h1")
+        self.assertEqual(set(holding_update), allowed - {"当前余额"})
+        self.assertEqual(holding_update["状态"], ["持有"])
         for update in self.updates_to("tbl_account"):
             self.assertLessEqual(set(update["a_bank"]), allowed)
+        # 公式字段永不写入。
+        for update in self.updates_to("tbl_holding"):
+            for forbidden in ("市值", "浮动盈亏"):
+                self.assertNotIn(forbidden, update["h1"])
+
+    def test_rebuild_status_diff_and_apply(self):
+        # 外部把状态改成已清仓：份额仍是 1500，rebuild 应改回 持有。
+        self.invest_scenario()
+        self.record(self.holdings, "h1")["fields"]["状态"] = ["已清仓"]
+
+        dry = rebuild_flow.run_rebuild(self.cfg, apply=False)
+        item = diff_item(dry["diff"], "状态", "贵州茅台")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["现值"], "已清仓")
+        self.assertEqual(item["应为"], "持有")
+
+        rebuild_flow.run_rebuild(self.cfg, apply=True)
+        self.assertEqual(
+            self.record(self.holdings, "h1")["fields"]["状态"], ["持有"]
+        )
+
+    def test_rebuild_derives_cleared_status_from_zero_shares(self):
+        # 期初 0 股且无交易：重放后份额为 0，状态必须是已清仓。
+        self.accounts = [
+            account_record("a_invest", "华泰证券", "理财", 50000, 50000)
+        ]
+        self.holdings = [
+            holding_record(
+                "h1", "贵州茅台", 0, 0, shares=0, cost=0, status="持有"
+            )
+        ]
+        self.entries = []
+
+        dry = rebuild_flow.run_rebuild(self.cfg, apply=False)
+
+        item = diff_item(dry["diff"], "状态", "贵州茅台")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["现值"], "持有")
+        self.assertEqual(item["应为"], "已清仓")
 
     def test_rebuild_missing_account_does_not_crash(self):
         self.simple_scenario(cash_current=9999)
@@ -869,7 +893,92 @@ class RebuildTest(RebuildFlowTestBase):
             diff_item(result["diff"], "当前余额", "现金")["应为"], 1165.0
         )
         self.assertTrue(result["diagnostics"])
+        self.assertTrue(result["tainted"])
         self.assertIn("a_missing", " ".join(result["diagnostics"]))
+
+    def test_rebuild_apply_refuses_when_direction_row_missing(self):
+        self.invest_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] != "e_transfer"
+        ]
+
+        with self.assertRaises(rebuild_flow.TaintedReplay) as caught:
+            rebuild_flow.run_rebuild(self.cfg, apply=True)
+
+        self.assertTrue(
+            any(
+                "买卖方向" in message
+                for message in caught.exception.diagnostics
+            )
+        )
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("update", "delete")],
+            [],
+        )
+
+    def test_rebuild_trade_row_missing_is_tainted_not_row_sum(self):
+        # 方向行还在、持仓交易行被删：绝不能回退成行级求和（理财现金 +6000）。
+        self.invest_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] != "e_trade"
+        ]
+
+        result = rebuild_flow.run_rebuild(self.cfg, apply=False)
+
+        self.assertTrue(result["tainted"])
+        self.assertIn(
+            "疑似缺少持仓交易行", " ".join(result["diagnostics"])
+        )
+        self.assertIsNone(
+            diff_item(result["diff"], "当前余额", "华泰证券")
+        )
+
+    def test_rebuild_apply_refuses_even_when_diff_is_empty(self):
+        # 账实恰好一致也不能在不可信重放下写回（旧缺陷：打印“账实一致”并退出 0）。
+        self.simple_scenario(cash_current=1165)
+        self.entries.append(
+            entry_row("e_ghost", "支出", 10, "a_missing", created=300)
+        )
+
+        with self.assertRaises(rebuild_flow.TaintedReplay):
+            rebuild_flow.run_rebuild(self.cfg, apply=True)
+
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("update", "delete")],
+            [],
+        )
+
+    def test_rebuild_non_dict_fields_is_diagnosed(self):
+        self.simple_scenario(cash_current=1165)
+        self.entries.append(
+            {"record_id": "e_bad", "fields": "not-a-dict"}
+        )
+
+        result = rebuild_flow.run_rebuild(self.cfg, apply=False)
+
+        self.assertTrue(result["tainted"])
+        self.assertIn("fields 不是对象", " ".join(result["diagnostics"]))
+        with self.assertRaises(rebuild_flow.TaintedReplay):
+            rebuild_flow.run_rebuild(self.cfg, apply=True)
+
+    def test_rebuild_paginates_beyond_one_page(self):
+        self.accounts = [
+            account_record("a_cash", "现金", "现金", 1000, 1000)
+        ]
+        self.entries = [
+            entry_row(
+                "e%03d" % index, "支出", 1, "a_cash", created=1000 + index
+            )
+            for index in range(230)
+        ]
+
+        result = rebuild_flow.run_rebuild(self.cfg, apply=False)
+
+        item = diff_item(result["diff"], "当前余额", "现金")
+        self.assertIsNotNone(item)
+        # 230 笔各 1 元；只读前 200 行会得到 800，读全才是 770。
+        self.assertEqual(item["应为"], 770.0)
+        self.assertGreaterEqual(self.searches.count("tbl_entry"), 2)
 
 
 class DeleteTest(RebuildFlowTestBase):
@@ -940,6 +1049,29 @@ class DeleteTest(RebuildFlowTestBase):
         )
         self.assertEqual(
             self.record(self.holdings, "h1")["fields"]["成本价"], 10.0
+        )
+        # 清仓状态必须随份额一起回滚，否则行情回补会跳过它。
+        self.assertEqual(
+            self.record(self.holdings, "h1")["fields"]["状态"], ["持有"]
+        )
+        holding_update = self.update_fields("tbl_holding", "h1")
+        self.assertEqual(holding_update["状态"], ["持有"])
+        self.assertEqual(holding_update["当前份额"], 1000.0)
+
+    def test_delete_refuses_before_deleting_when_replay_tainted(self):
+        self.loan_scenario()
+        self.entries.append(
+            entry_row("e_ghost", "支出", 10, "a_missing", created=300)
+        )
+
+        with captured_output():
+            with self.assertRaises(rebuild_flow.TaintedReplay):
+                rebuild_flow.run_delete(self.cfg, "e_int", yes=True)
+
+        self.assertEqual(len(self.entries), 3)
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("delete", "update")],
+            [],
         )
 
     def test_delete_update_failure_reports_partial(self):
@@ -1059,6 +1191,114 @@ class EditTest(RebuildFlowTestBase):
             [call for call in self.calls if call[0] == "update"], []
         )
 
+    def test_edit_amount_matches_from_scratch_rebuild(self):
+        self.simple_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] == "e_expense"
+        ]
+        self.record(self.accounts, "a_cash")["fields"]["当前余额"] = 965.0
+
+        rebuild_flow.run_edit(self.cfg, "e_expense", amount=40)
+
+        self.assertEqual(
+            rebuild_flow.run_rebuild(self.cfg, apply=False)["diff"], []
+        )
+
+    def test_edit_account_matches_from_scratch_rebuild(self):
+        self.simple_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] == "e_expense"
+        ]
+        self.record(self.accounts, "a_cash")["fields"]["当前余额"] = 965.0
+        self.accounts.append(
+            account_record("a_cash2", "备用金", "现金", 1000)
+        )
+
+        rebuild_flow.run_edit(self.cfg, "e_expense", account="备用金")
+
+        self.assertEqual(
+            rebuild_flow.run_rebuild(self.cfg, apply=False)["diff"], []
+        )
+
+    def test_edit_date_reorders_buys_and_matches_rebuild(self):
+        # 期初 100@10；11-10 买 100@20；11-15 卖 100@15；11-20 买 100@10。
+        # 把第二笔买入改到 11-12 会排到卖出之前，加权成本随之变化。
+        self.accounts = [
+            account_record("a_bank", "招行工资卡", "银行卡", 100000, 98500),
+            account_record("a_invest", "华泰证券", "理财", 50000, 50000),
+        ]
+        self.holdings = [
+            holding_record("h1", "贵州茅台", 100, 10, shares=200, cost=12.5)
+        ]
+        tag_a, tag_s, tag_b = (
+            " #G0000000a",
+            " #G0000000b",
+            " #G0000000c",
+        )
+        self.entries = [
+            entry_row(
+                "a1", "转账", 2000, "a_bank", to="a_invest",
+                note=tag_a, date="2026-11-10", created=100,
+            ),
+            entry_row(
+                "a2", "转账", 2000, "a_invest", to="a_invest",
+                holding="h1", price=20, shares=100,
+                note=tag_a, date="2026-11-10", created=101,
+            ),
+            entry_row(
+                "s1", "转账", 1500, "a_invest", to="a_bank",
+                note=tag_s, date="2026-11-15", created=200,
+            ),
+            entry_row(
+                "s2", "收入", 500, "a_invest", category="c_sell",
+                note=tag_s, date="2026-11-15", created=201,
+            ),
+            entry_row(
+                "s3", "转账", 1500, "a_invest", to="a_invest",
+                holding="h1", price=15, shares=100,
+                note=tag_s, date="2026-11-15", created=202,
+            ),
+            entry_row(
+                "b1", "转账", 1000, "a_bank", to="a_invest",
+                note=tag_b, date="2026-11-20", created=300,
+            ),
+            entry_row(
+                "b2", "转账", 1000, "a_invest", to="a_invest",
+                holding="h1", price=10, shares=100,
+                note=tag_b, date="2026-11-20", created=301,
+            ),
+        ]
+        # 先确认手搭的场景与 rebuild 一致。
+        self.assertEqual(
+            rebuild_flow.run_rebuild(self.cfg, apply=False)["diff"], []
+        )
+
+        rebuild_flow.run_edit(self.cfg, "b2", date="2026-11-12")
+
+        holding = self.record(self.holdings, "h1")["fields"]
+        self.assertEqual(holding["当前份额"], 200.0)
+        self.assertAlmostEqual(holding["成本价"], 13.3333, places=4)
+        self.assertEqual(
+            rebuild_flow.run_rebuild(self.cfg, apply=False)["diff"], []
+        )
+
+    def test_edit_refuses_before_writing_when_replay_tainted(self):
+        self.simple_scenario(cash_current=1165)
+        self.entries.append(
+            entry_row("e_ghost", "支出", 10, "a_missing", created=300)
+        )
+
+        with self.assertRaises(rebuild_flow.TaintedReplay):
+            rebuild_flow.run_edit(self.cfg, "e_expense", amount=40)
+
+        # 投影重放不可信：明细行与余额都没有写。
+        self.assertEqual(
+            self.record(self.entries, "e_expense")["fields"]["金额"], 35.0
+        )
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "update"], []
+        )
+
     def test_edit_requires_at_least_one_field(self):
         self.simple_scenario()
 
@@ -1163,6 +1403,78 @@ class LedgerCliRebuildTest(RebuildFlowTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(self.entries, [])
         self.assertIn("已删除", out.getvalue())
+
+    def test_cli_rebuild_tainted_dry_run_exit_0(self):
+        self.invest_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] != "e_transfer"
+        ]
+
+        with captured_output() as (out, err):
+            code = ledger.main(["rebuild"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("诊断", out.getvalue())
+        self.assertIn("重放不可信", out.getvalue())
+        self.assertNotIn("账实一致", out.getvalue())
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("update", "delete")],
+            [],
+        )
+
+    def test_cli_rebuild_tainted_apply_exit_5(self):
+        self.invest_scenario()
+        self.entries = [
+            row for row in self.entries if row["record_id"] != "e_transfer"
+        ]
+
+        with captured_output() as (out, err):
+            code = ledger.main(["rebuild", "--apply"])
+
+        self.assertEqual(code, 5)
+        self.assertIn("诊断", out.getvalue())
+        self.assertIn("未写入任何数据", out.getvalue())
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("update", "delete")],
+            [],
+        )
+
+    def test_cli_edit_tainted_exit_5(self):
+        self.simple_scenario(cash_current=1165)
+        self.entries.append(
+            entry_row("e_ghost", "支出", 10, "a_missing", created=300)
+        )
+
+        with captured_output() as (out, err):
+            code = ledger.main(["edit", "e_expense", "--amount", "40"])
+
+        self.assertEqual(code, 5)
+        self.assertIn("诊断", out.getvalue())
+        self.assertIn("未写入任何数据", out.getvalue())
+        self.assertEqual(
+            self.record(self.entries, "e_expense")["fields"]["金额"], 35.0
+        )
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "update"], []
+        )
+
+    def test_cli_delete_tainted_exit_5(self):
+        self.loan_scenario()
+        self.entries.append(
+            entry_row("e_ghost", "支出", 10, "a_missing", created=300)
+        )
+
+        with captured_output() as (out, err):
+            code = ledger.main(["delete", "e_int", "--yes"])
+
+        self.assertEqual(code, 5)
+        self.assertIn("诊断", out.getvalue())
+        self.assertIn("未写入任何数据", out.getvalue())
+        self.assertEqual(len(self.entries), 3)
+        self.assertEqual(
+            [call for call in self.calls if call[0] in ("delete", "update")],
+            [],
+        )
 
     def test_cli_edit_amount(self):
         self.simple_scenario()

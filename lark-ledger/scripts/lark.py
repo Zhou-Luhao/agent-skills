@@ -421,16 +421,18 @@ def search_records(
     table_id: str,
     conditions: Optional[List[list]] = None,
     limit: int = 2000,
+    offset: int = 0,
 ) -> List[dict]:
     """按条件查询记录，最多返回 limit 条（自动按 200 行/页翻页）。
 
     conditions 形如 `[["字段名", "==", 值]]`；None 表示不过滤。
+    `offset` 是起始行偏移，调用方可以循环翻页把整表读尽。
     """
     if limit <= 0:
         return []
 
     records: List[dict] = []
-    offset = 0
+    start = max(0, int(offset))
     while len(records) < limit:
         page_size = min(INLINE_PAGE_LIMIT, limit - len(records))
         args = [
@@ -443,7 +445,7 @@ def search_records(
             "--limit",
             str(page_size),
             "--offset",
-            str(offset),
+            str(start),
         ]
         if conditions is not None:
             args.extend(
@@ -455,7 +457,7 @@ def search_records(
         data = run_cli(args)
         page = _records_from_matrix(data)
         records.extend(page)
-        offset += len(page)
+        start += len(page)
         if not data.get("has_more") or not page:
             break
     return records[:limit]

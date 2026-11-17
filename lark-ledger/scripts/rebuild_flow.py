@@ -5,7 +5,11 @@
   期初份额 / 期初成本 起，按 (日期, 创建时间, record_id) 逐笔重放全部明细；
 - 因此 edit / delete 对受影响对象的修正结果，与一次 from-scratch rebuild
   完全相同；当前余额、当前份额只用于展示差异，绝不作为计算输入；
-- 绝不写公式字段（市值 / 浮动盈亏），也不改持仓状态。
+- 重放不可信（tainted）时**绝不写回**：edit / delete 在写任何数据之前先对
+  「投影后的明细」重放，含 diagnose 的组直接中止；rebuild --apply 同样拒绝。
+  dry-run 只打印诊断并退出 0；
+- 绝不写公式字段（市值 / 浮动盈亏）。持仓「状态」由重放后的份额派生
+  （持有 / 已清仓），会随 rebuild、edit、delete 一起修正。
 
 写入顺序沿用 add 流程的约定：先改/删明细，再更新账户与持仓。任一步失败都
 抛 PartialWriteError，保留已完成/未完成步骤，不把部分成功伪装成整体成功。
@@ -28,10 +32,23 @@ HOLDING_TABLE = posting.HOLDING_TABLE
 
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TAG_PATTERN = re.compile(r"#G[0-9a-fA-F]{8}")
+# lark.search_records 的 limit 是「总上限」，必须按页循环把整表读尽。
+PAGE_SIZE = lark.INLINE_PAGE_LIMIT
+# 防御：即使账本异常膨胀也不做无界扫描（超过即拒绝写入）。
+MAX_ENTRIES = 100000
 
 
 class ConfirmationRequired(RuntimeError):
     """多明细组删除缺少 --yes；此时没有写入任何数据。"""
+
+
+class TaintedReplay(RuntimeError):
+    """重放无法完整解释账本：调用方必须先修数据，绝不写回。"""
+
+    def __init__(self, diagnostics) -> None:
+        self.diagnostics = [str(message) for message in (diagnostics or [])]
+        detail = "；".join(self.diagnostics) or "未知原因"
+        super().__init__("重放不可信：%s" % detail)
 
 
 def _table(cfg: dict, table_name: str) -> Tuple[str, str]:
@@ -53,14 +70,30 @@ def _table(cfg: dict, table_name: str) -> Tuple[str, str]:
 
 
 def _entries(cfg: dict) -> List[dict]:
-    """读取全部明细（个人账本量级，2000 行足够）。"""
+    """分页读尽全部明细（search_records 的 limit 是总上限，不是页大小）。
+
+    fields 不是 dict 的异常记录不会被丢掉：交给 replay 生成诊断并置
+    tainted，让所有写回操作在修数据前中止。
+    """
     app_token, table_id = _table(cfg, ENTRY_TABLE)
-    records = lark.search_records(app_token, table_id, limit=2000)
-    return [
-        record
-        for record in records
-        if isinstance(record, dict) and isinstance(record.get("fields"), dict)
-    ]
+    records: List[dict] = []
+    offset = 0
+    while True:
+        page = lark.search_records(
+            app_token, table_id, limit=PAGE_SIZE, offset=offset
+        )
+        records.extend(page)
+        if len(page) < PAGE_SIZE:
+            break
+        offset += len(page)
+        if len(records) > MAX_ENTRIES:
+            raise TaintedReplay(
+                [
+                    "明细行数超过 %d 行上限，已中止（未写入任何数据）"
+                    % MAX_ENTRIES
+                ]
+            )
+    return [record for record in records if isinstance(record, dict)]
 
 
 def _snapshot(cfg: dict) -> Tuple[Dict[str, dict], Dict[str, dict]]:
@@ -104,6 +137,25 @@ def _number(fields: Any, name: str) -> Optional[float]:
     return number
 
 
+def _choice_text(fields: Any, name: str) -> str:
+    """单选/文本单元格 → 文本（状态等字段）。"""
+    if not isinstance(fields, dict):
+        return ""
+    value = fields.get(name)
+    if isinstance(value, str):
+        return value.strip()
+    items = value if isinstance(value, (list, tuple)) else []
+    for item in items:
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+        if isinstance(item, dict):
+            for key in ("text", "name", "id"):
+                raw = item.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+    return ""
+
+
 def _same(left: float, right: float, digits: int) -> bool:
     return abs(round(left, digits) - round(right, digits)) < 1e-9
 
@@ -137,20 +189,18 @@ def _holding_label(holding_id: str, holdings: Dict[str, dict]) -> str:
     return "持仓「%s」" % holding_id
 
 
-def _recompute(
-    cfg: dict,
+def _updates_from_replay(
+    replayed: dict,
+    accounts: Dict[str, dict],
+    holdings: Dict[str, dict],
     account_ids,
     holding_ids,
-    entries: Optional[List[dict]] = None,
-) -> Tuple[List[Tuple[str, str, Dict[str, Any]]], List[str]]:
-    """用 replay 的绝对值生成受影响对象的更新列表。
+) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """把 replay 的绝对值转成受影响账户/持仓的更新列表。
 
     只更新传入 id 的对象；其它账户/持仓的漂移交给 rebuild 处理。
+    持仓同时写 当前份额 / 成本价 / 状态，三者在同一次更新里保持一致。
     """
-    rows = _entries(cfg) if entries is None else entries
-    accounts, holdings = _snapshot(cfg)
-    replayed = posting.replay(rows, accounts, holdings)
-
     updates: List[Tuple[str, str, Dict[str, Any]]] = []
     for account_id in sorted(set(account_ids)):
         if account_id not in accounts or account_id not in replayed["accounts"]:
@@ -168,17 +218,27 @@ def _recompute(
         state = replayed["holdings"][holding_id]
         current_shares = _number(holdings[holding_id], "当前份额")
         current_cost = _number(holdings[holding_id], "成本价")
-        fields: Dict[str, Any] = {}
-        if current_shares is None or not _same(
+        current_status = _choice_text(holdings[holding_id], "状态")
+        shares_differ = current_shares is None or not _same(
             current_shares, state["shares"], 4
-        ):
-            fields["当前份额"] = state["shares"]
-        if current_cost is None or not _same(current_cost, state["cost"], 4):
-            fields["成本价"] = state["cost"]
-        if fields:
-            updates.append((HOLDING_TABLE, holding_id, fields))
-
-    return updates, list(replayed["diagnostics"])
+        )
+        cost_differ = current_cost is None or not _same(
+            current_cost, state["cost"], 4
+        )
+        status_differ = current_status != state["status"]
+        if shares_differ or cost_differ or status_differ:
+            updates.append(
+                (
+                    HOLDING_TABLE,
+                    holding_id,
+                    {
+                        "当前份额": state["shares"],
+                        "成本价": state["cost"],
+                        "状态": [state["status"]],
+                    },
+                )
+            )
+    return updates
 
 
 def _write_updates(
@@ -299,6 +359,23 @@ def _note_with_tag(note: str, tag: Optional[str]) -> str:
     return ("%s %s" % (cleaned, tag)).strip()
 
 
+def _project_edit(
+    entries: List[dict], record_id: str, changes: Dict[str, Any]
+) -> List[dict]:
+    """在内存里投影「改完这一行之后」的明细，用于写库前的安全重放。"""
+    projected: List[dict] = []
+    for row in entries:
+        if row.get("record_id") != record_id:
+            projected.append(row)
+            continue
+        new_row = dict(row)
+        fields = dict(row.get("fields") or {})
+        fields.update(changes)
+        new_row["fields"] = fields
+        projected.append(new_row)
+    return projected
+
+
 def run_edit(
     cfg: dict,
     record_id: str,
@@ -308,11 +385,21 @@ def run_edit(
     category: Any = None,
     note: Any = None,
 ) -> dict:
-    """改一条明细，然后按全量 replay 修正该组影响的账户/持仓。"""
+    """改一条明细，然后按全量 replay 修正该组影响的账户/持仓。
+
+    先对「投影后的明细」重放；tainted 时抛 TaintedReplay，明细行也还没写，
+    保证「重放不可信 ⇒ 什么都没写」。
+    """
     record_id = _require_record_id(record_id)
     entries = _entries(cfg)
     row = _find(entries, record_id)
-    fields = row.get("fields") or {}
+    source_fields = row.get("fields")
+    if not isinstance(source_fields, dict):
+        raise posting.PostingError(
+            "明细「%s」的 fields 不是对象，无法编辑；请先到飞书表格修复该行"
+            % record_id
+        )
+    fields = source_fields
 
     changes: Dict[str, Any] = {}
     if amount is not None:
@@ -340,23 +427,29 @@ def run_edit(
             "（--amount/--date/--account/--category/--note）"
         )
 
+    projected = _project_edit(entries, record_id, changes)
+    accounts, holdings = _snapshot(cfg)
+    replayed = posting.replay(projected, accounts, holdings)
+    if replayed["tainted"]:
+        raise TaintedReplay(replayed["diagnostics"])
+
+    new_row = _find(projected, record_id)
     affected_before = posting.group_object_ids(
         posting.group_rows(entries, row)
     )
-    app_token, table_id = _table(cfg, ENTRY_TABLE)
-    lark.update_records(app_token, table_id, {record_id: _cell_fields(changes)})
-
-    new_entries = _entries(cfg)
-    new_row = _find(new_entries, record_id)
     affected_after = posting.group_object_ids(
-        posting.group_rows(new_entries, new_row)
+        posting.group_rows(projected, new_row)
     )
-    updates, diagnostics = _recompute(
-        cfg,
+    updates = _updates_from_replay(
+        replayed,
+        accounts,
+        holdings,
         affected_before["accounts"] | affected_after["accounts"],
         affected_before["holdings"] | affected_after["holdings"],
-        entries=new_entries,
     )
+
+    app_token, table_id = _table(cfg, ENTRY_TABLE)
+    lark.update_records(app_token, table_id, {record_id: _cell_fields(changes)})
     try:
         updated = _write_updates(cfg, updates)
     except add_flow.PartialWriteError as exc:
@@ -371,7 +464,7 @@ def run_edit(
         "record_id": record_id,
         "changed": sorted(changes),
         "updated": updated,
-        "diagnostics": diagnostics,
+        "diagnostics": list(replayed["diagnostics"]),
     }
 
 
@@ -392,7 +485,9 @@ def _print_delete_targets(group: List[dict]) -> None:
         title += "（组 %s）" % tag
     print(title + "：")
     for index, row in enumerate(group, 1):
-        fields = row.get("fields") or {}
+        fields = row.get("fields")
+        if not isinstance(fields, dict):
+            fields = {}
         date = posting.row_date(fields) or "?"
         kind = posting.row_type(fields) or "?"
         amount = _number(fields, "金额")
@@ -413,8 +508,20 @@ def _print_delete_targets(group: List[dict]) -> None:
         )
 
 
+def _project_delete(
+    entries: List[dict], record_ids: List[str]
+) -> List[dict]:
+    """内存里投影「删完这一组之后」的明细。"""
+    removed = set(record_ids)
+    return [row for row in entries if row.get("record_id") not in removed]
+
+
 def run_delete(cfg: dict, record_id: str, yes: bool = False) -> dict:
-    """按 #G tag 自动扩组删除，再用 replay 修正受影响的账户/持仓。"""
+    """按 #G tag 自动扩组删除，再用 replay 修正受影响的账户/持仓。
+
+    删除前先对「投影删除后的明细」重放；tainted 时抛 TaintedReplay，
+    一行都不删，保证「重放不可信 ⇒ 什么都没写」。
+    """
     record_id = _require_record_id(record_id)
     entries = _entries(cfg)
     row = _find(entries, record_id)
@@ -439,12 +546,22 @@ def run_delete(cfg: dict, record_id: str, yes: bool = False) -> dict:
         )
 
     affected = posting.group_object_ids(group)
+    accounts, holdings = _snapshot(cfg)
+    replayed = posting.replay(
+        _project_delete(entries, record_ids), accounts, holdings
+    )
+    if replayed["tainted"]:
+        raise TaintedReplay(replayed["diagnostics"])
+    updates = _updates_from_replay(
+        replayed,
+        accounts,
+        holdings,
+        affected["accounts"],
+        affected["holdings"],
+    )
+
     app_token, table_id = _table(cfg, ENTRY_TABLE)
     lark.delete_records(app_token, table_id, record_ids)
-
-    updates, diagnostics = _recompute(
-        cfg, affected["accounts"], affected["holdings"]
-    )
     try:
         updated = _write_updates(cfg, updates)
     except add_flow.PartialWriteError as exc:
@@ -458,7 +575,7 @@ def run_delete(cfg: dict, record_id: str, yes: bool = False) -> dict:
     return {
         "deleted": record_ids,
         "updated": updated,
-        "diagnostics": diagnostics,
+        "diagnostics": list(replayed["diagnostics"]),
     }
 
 
@@ -468,10 +585,16 @@ def run_delete(cfg: dict, record_id: str, yes: bool = False) -> dict:
 
 
 def run_rebuild(cfg: dict, apply: bool = False) -> dict:
-    """重建全部账户余额与持仓份额/成本，返回差异；apply=False 只读。"""
+    """重建全部账户余额与持仓，返回差异；apply=False 只读。
+
+    tainted 的 replay（有诊断）在 apply=True 时抛 TaintedReplay，一行不写；
+    dry-run 照常返回 diff/diagnostics 供展示。
+    """
     entries = _entries(cfg)
     accounts, holdings = _snapshot(cfg)
     replayed = posting.replay(entries, accounts, holdings)
+    diagnostics = list(replayed["diagnostics"])
+    tainted = bool(replayed["tainted"])
 
     diff: List[dict] = []
     updates: List[Tuple[str, str, Dict[str, Any]]] = []
@@ -499,12 +622,14 @@ def run_rebuild(cfg: dict, apply: bool = False) -> dict:
         state = replayed["holdings"][holding_id]
         current_shares = _number(holdings[holding_id], "当前份额")
         current_cost = _number(holdings[holding_id], "成本价")
+        current_status = _choice_text(holdings[holding_id], "状态")
         shares_differ = current_shares is None or not _same(
             current_shares, state["shares"], 4
         )
         cost_differ = current_cost is None or not _same(
             current_cost, state["cost"], 4
         )
+        status_differ = current_status != state["status"]
         if shares_differ:
             diff.append(
                 {
@@ -523,8 +648,17 @@ def run_rebuild(cfg: dict, apply: bool = False) -> dict:
                     "应为": state["cost"],
                 }
             )
-        if shares_differ or cost_differ:
-            # 份额与成本价一起写：两者共同构成持仓的重建结果，避免只改一半。
+        if status_differ:
+            diff.append(
+                {
+                    "对象": _holding_label(holding_id, holdings),
+                    "字段": "状态",
+                    "现值": current_status or None,
+                    "应为": state["status"],
+                }
+            )
+        if shares_differ or cost_differ or status_differ:
+            # 份额/成本/状态一起写：三者共同构成持仓的重建结果。
             updates.append(
                 (
                     HOLDING_TABLE,
@@ -532,9 +666,13 @@ def run_rebuild(cfg: dict, apply: bool = False) -> dict:
                     {
                         "当前份额": state["shares"],
                         "成本价": state["cost"],
+                        "状态": [state["status"]],
                     },
                 )
             )
+
+    if apply and tainted:
+        raise TaintedReplay(diagnostics)
 
     applied = False
     updated = 0
@@ -546,5 +684,7 @@ def run_rebuild(cfg: dict, apply: bool = False) -> dict:
         "diff": diff,
         "applied": applied,
         "updated": updated,
-        "diagnostics": list(replayed["diagnostics"]),
+        "tainted": tainted,
+        "diagnostics": diagnostics,
+        "tainted_groups": list(replayed["tainted_groups"]),
     }

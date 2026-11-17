@@ -539,15 +539,20 @@ def _run_add(args: argparse.Namespace) -> int:
 
 def _run_edit(args: argparse.Namespace) -> int:
     cfg = config.load_config()
-    result = rebuild_flow.run_edit(
-        cfg,
-        args.record_id,
-        amount=args.amount,
-        date=args.date,
-        account=args.account,
-        category=args.category,
-        note=args.note,
-    )
+    try:
+        result = rebuild_flow.run_edit(
+            cfg,
+            args.record_id,
+            amount=args.amount,
+            date=args.date,
+            account=args.account,
+            category=args.category,
+            note=args.note,
+        )
+    except rebuild_flow.TaintedReplay as exc:
+        _print_diagnostics(exc.diagnostics)
+        print("重放不可信：已中止，未写入任何数据；请先修正上述问题。")
+        return EXIT_DATA
     _print_diagnostics(result.get("diagnostics"))
     print(
         "已修改明细 %s：变更 %s；重算更新 %d 项"
@@ -569,6 +574,10 @@ def _run_delete(args: argparse.Namespace) -> int:
     except rebuild_flow.ConfirmationRequired as exc:
         print("未删除：%s" % exc, file=sys.stderr)
         return EXIT_USAGE
+    except rebuild_flow.TaintedReplay as exc:
+        _print_diagnostics(exc.diagnostics)
+        print("重放不可信：已中止，未删除/未写入任何数据；请先修正上述问题。")
+        return EXIT_DATA
     _print_diagnostics(result.get("diagnostics"))
     print(
         "已删除 %d 条明细：%s；重算更新 %d 项"
@@ -587,7 +596,17 @@ def _diff_text(value: Any) -> str:
 
 def _run_rebuild(args: argparse.Namespace) -> int:
     cfg = config.load_config()
-    result = rebuild_flow.run_rebuild(cfg, apply=args.apply)
+    try:
+        result = rebuild_flow.run_rebuild(cfg, apply=args.apply)
+    except rebuild_flow.TaintedReplay as exc:
+        _print_diagnostics(exc.diagnostics)
+        print("重放不可信：未写入任何数据；请先修正上述问题。")
+        return EXIT_DATA
+    if result.get("tainted"):
+        # dry-run：允许看诊断，但不展示/写入任何基于不可信重放的差异。
+        _print_diagnostics(result["diagnostics"])
+        print("重放不可信（dry-run）：未写入任何数据；请先修正上述问题。")
+        return EXIT_OK
     _print_diagnostics(result.get("diagnostics"))
     diff = result["diff"]
     if not diff:
@@ -611,8 +630,9 @@ def _run_rebuild(args: argparse.Namespace) -> int:
 
 
 def _print_diagnostics(diagnostics) -> None:
+    # 诊断必须让用户看见：统一走 stdout，避免与“成功/失败”混在 stderr。
     for message in diagnostics or []:
-        print("诊断：%s" % message, file=sys.stderr)
+        print("诊断：%s" % message)
 
 
 def _cell_text(value: Any) -> str:

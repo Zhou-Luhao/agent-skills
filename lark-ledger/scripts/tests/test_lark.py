@@ -590,6 +590,14 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(_flag(cmd, "--limit"), "50")
 
     @mock.patch("lark.subprocess.run")
+    def test_explicit_offset_starts_there(self, run):
+        run.return_value = _proc(_envelope(_matrix([], [], [])))
+
+        lark.search_records("app1", "tbl1", limit=50, offset=120)
+
+        self.assertEqual(_flag(_cmd(run), "--offset"), "120")
+
+    @mock.patch("lark.subprocess.run")
     def test_pagination_advances_by_page_size(self, run):
         first_ids = ["rec%03d" % i for i in range(200)]
         first_rows = [[i] for i in range(200)]
