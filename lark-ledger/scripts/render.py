@@ -615,9 +615,15 @@ def render_html(data: dict) -> str:
 
 
 def _md_cell(value: object) -> str:
-    """Escape a value for a Markdown table cell (pipes and newlines)."""
+    """Escape a value for a Markdown table cell (backslashes, pipes, newlines).
+
+    Backslashes must be doubled *before* pipes: otherwise an input that already
+    contains ``\\|`` would become ``a\\\\|b`` and the pipe would still split the
+    cell.
+    """
     text = "—" if value is None else str(value)
     text = text.replace("\r", " ").replace("\n", " ")
+    text = text.replace("\\", "\\\\")
     return text.replace("|", "\\|")
 
 

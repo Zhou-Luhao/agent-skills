@@ -207,6 +207,51 @@ class HtmlRenderTest(unittest.TestCase):
         self.assertIn("&lt;b&gt;餐饮&lt;/b&gt;", html)
         self.assertNotIn("<b>餐饮</b>", html)
 
+    def test_html_zero_amount_category_no_crash(self):
+        """A zero-amount category must not reach a 0/0 bar-width division."""
+        data = base_data()
+        data["summary"]["by_category"] = [
+            {"一级": "其他", "二级": "冲销", "金额": 0}
+        ]
+        data["summary"]["expense"] = 0.0
+
+        html = render.render_html(data)
+
+        self.assertIsInstance(html, str)
+        self.assertIn("其他", html)
+        self.assertIn("0.00", html)
+        self.assertIn("暂无数据", html)  # 条形图为空 → 占位
+
+    def test_html_negative_net_worth_series(self):
+        data = base_data()
+        data["net_worth"] = [
+            ["2026-11-16", -50000.0],
+            ["2026-11-22", -12000.5],
+        ]
+
+        html = render.render_html(data)
+
+        self.assertIn("<polyline", html)
+        self.assertIn("-12,000.50", html)
+        self.assertIn("-5.0万", html)
+        self.assertNotIn("nan", html.lower())
+
+    def test_html_escapes_code_liability_and_axis_date(self):
+        payload = "<img src=x onerror=alert(1)>"
+        data = base_data()
+        data["holdings"][0]["代码"] = payload
+        data["liabilities"][0]["名称"] = '<script>alert("liab")</script>'
+        data["net_worth"][1][0] = "2026-11-20<b>"
+
+        html = render.render_html(data)
+
+        self.assertIn("&lt;img", html)
+        self.assertNotIn(payload, html)
+        self.assertIn("&lt;script&gt;", html)
+        self.assertNotIn("<script>alert", html)
+        self.assertIn("20&lt;b&gt;", html)  # SVG 横轴日期
+        self.assertNotIn("20<b>", html)
+
 
 class MarkdownRenderTest(unittest.TestCase):
     def test_markdown_totals(self):
@@ -237,6 +282,7 @@ class MarkdownRenderTest(unittest.TestCase):
         data["summary"]["by_category"][0]["一级"] = "餐饮|外卖"
         data["summary"]["by_category"][0]["二级"] = "午餐\n加餐"
         data["holdings"][0]["名称"] = "茅台|A"
+        data["holdings"][0]["代码"] = "a\\|b"
         data["liabilities"][0]["名称"] = "房|贷"
         data["meta"]["start"] = "2026-11-16\n# 注入"
 
@@ -246,6 +292,8 @@ class MarkdownRenderTest(unittest.TestCase):
         self.assertIn("午餐 加餐", md)
         self.assertIn("茅台\\|A", md)
         self.assertIn("房\\|贷", md)
+        # 反斜杠先加倍，原有的 "\|" 才不会让管道符拆列。
+        self.assertIn("a\\\\\\|b", md)
         self.assertNotIn("餐饮|外卖", md)
         self.assertNotIn("茅台|A", md)
         self.assertNotIn("\n# 注入", md)
