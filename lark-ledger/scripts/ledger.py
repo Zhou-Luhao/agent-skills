@@ -2,10 +2,11 @@
 
 退出码约定：0 成功 / 2 参数错误 / 3 未配置或未登录 / 4 lark-cli 调用失败 / 5 数据错误。
 已实现 init（建账本）、add（记一笔）、edit / delete / rebuild（修正与重算）、
-quotes（行情回补）与 account / holding 主数据子命令。
+quotes（行情回补）、snapshot（资产快照）与 account / holding 主数据子命令。
 """
 
 import argparse
+import datetime
 import sys
 import unicodedata
 from typing import Any, List, Optional
@@ -18,6 +19,7 @@ import master_data
 import posting
 import quotes_flow
 import rebuild_flow
+import snapshot_flow
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -299,6 +301,18 @@ def _add_quotes_parser(subparsers) -> None:
     )
 
 
+def _add_snapshot_parser(subparsers) -> None:
+    snapshot = subparsers.add_parser(
+        "snapshot",
+        help="落一份资产快照（缺省今天；同一日期重复执行只更新不重复创建）",
+    )
+    snapshot.add_argument(
+        "--date",
+        default=None,
+        help="快照日期 YYYY-MM-DD（默认：今天，UTC+8）",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ledger.py",
@@ -325,6 +339,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_delete_parser(subparsers)
     _add_rebuild_parser(subparsers)
     _add_quotes_parser(subparsers)
+    _add_snapshot_parser(subparsers)
     _add_account_parsers(subparsers)
     _add_holding_parsers(subparsers)
     return parser
@@ -819,6 +834,28 @@ def _run_quotes(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _run_snapshot(args: argparse.Namespace) -> int:
+    date_str = args.date
+    if date_str is not None:
+        # 日期格式是用户参数：先在这里挡掉，返回 2 而不是等到写表报数据错误。
+        try:
+            if not snapshot_flow.DATE_PATTERN.fullmatch(date_str):
+                raise ValueError(date_str)
+            datetime.date.fromisoformat(date_str)
+        except ValueError:
+            return _usage_error(
+                "--date 必须是 YYYY-MM-DD，实际是「%s」" % date_str
+            )
+    cfg = config.load_config()
+    # ConfigError → 3；LarkError → 4；SnapshotError → 5（由 main 统一映射）。
+    result = snapshot_flow.run_snapshot(cfg, date_str)
+    print(
+        "资产快照完成：%s，写入 %d 行。"
+        % (result["date"], result["written"])
+    )
+    return EXIT_OK
+
+
 def _run_account(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     if args.action == "add":
@@ -918,6 +955,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_rebuild(args)
         if args.command == "quotes":
             return _run_quotes(args)
+        if args.command == "snapshot":
+            return _run_snapshot(args)
         if args.command == "account":
             return _run_account(args)
         if args.command == "holding":
@@ -954,6 +993,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(str(exc), file=sys.stderr)
         return EXIT_NOT_READY
     except master_data.MasterDataError as exc:
+        print("数据错误：%s" % exc, file=sys.stderr)
+        return EXIT_DATA
+    except snapshot_flow.SnapshotError as exc:
         print("数据错误：%s" % exc, file=sys.stderr)
         return EXIT_DATA
     except init_flow.InitError as exc:
