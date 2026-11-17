@@ -1,7 +1,7 @@
 """lark-ledger 命令行入口。
 
 退出码约定：0 成功 / 2 参数错误 / 3 未配置或未登录 / 4 lark-cli 调用失败 / 5 数据错误。
-已实现 init（建账本）与 account / holding 主数据子命令。
+已实现 init（建账本）、add（记一笔）与 account / holding 主数据子命令。
 """
 
 import argparse
@@ -9,10 +9,12 @@ import sys
 import unicodedata
 from typing import Any, List, Optional
 
+import add_flow
 import config
 import init_flow
 import lark
 import master_data
+import posting
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -168,6 +170,43 @@ def _add_holding_parsers(subparsers) -> None:
     actions.add_parser("list", help="列出全部持仓")
 
 
+def _add_add_parser(subparsers) -> None:
+    add = subparsers.add_parser(
+        "add", help="记一笔收入/支出/转账（明细 + 账户余额联动）"
+    )
+    add.add_argument(
+        "--kind",
+        choices=("auto",) + posting.SUPPORTED_KINDS,
+        default="auto",
+        help=(
+            "记账类型（默认 auto：有 --to-account 即转账；分类以 支出· 开头"
+            "或金额为负即支出；否则收入）"
+        ),
+    )
+    add.add_argument(
+        "--date",
+        default=None,
+        help="日期 YYYY-MM-DD（默认：今天，UTC+8）",
+    )
+    add.add_argument(
+        "--amount",
+        required=True,
+        type=float,
+        help="金额，恒正；auto 模式下负数按支出处理（取绝对值）",
+    )
+    add.add_argument("--account", required=True, help="账户名称或 record_id")
+    add.add_argument(
+        "--to-account", default=None, help="转入账户（仅转账）"
+    )
+    add.add_argument(
+        "--category",
+        default=None,
+        help="分类全名，如 支出·餐饮·午餐（收入/支出必填，实时查分类表）",
+    )
+    add.add_argument("--summary", default=None, help="摘要，如 午饭")
+    add.add_argument("--note", default=None, help="备注")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ledger.py",
@@ -189,6 +228,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Base 名称（默认：%(default)s）",
     )
 
+    _add_add_parser(subparsers)
     _add_account_parsers(subparsers)
     _add_holding_parsers(subparsers)
     return parser
@@ -207,6 +247,74 @@ def _run_init(args: argparse.Namespace) -> int:
 def _usage_error(message: str) -> int:
     print("参数错误：%s" % message, file=sys.stderr)
     return EXIT_USAGE
+
+
+def _auto_kind(args: argparse.Namespace) -> str:
+    """--kind auto 的规则：转账看 --to-account，收支看分类前缀 / 金额符号。"""
+    if args.to_account is not None:
+        return "transfer"
+    category = (args.category or "").strip()
+    if category.startswith("支出·"):
+        return "expense"
+    if category.startswith("收入·"):
+        return "income"
+    return "expense" if args.amount < 0 else "income"
+
+
+def _run_add(args: argparse.Namespace) -> int:
+    auto = args.kind == "auto"
+    kind = _auto_kind(args) if auto else args.kind
+    amount = args.amount
+    # auto 用金额符号表达“支出”，落库金额仍恒正。
+    if auto and kind == "expense" and amount < 0:
+        amount = -amount
+
+    if kind == "transfer":
+        if args.to_account is None:
+            return _usage_error("转账必须指定 --to-account（转入账户）")
+        if args.category is not None:
+            return _usage_error(
+                "转账不需要 --category：分类只用于收入/支出"
+            )
+    else:
+        if args.to_account is not None:
+            return _usage_error(
+                "%s不需要 --to-account：只有转账才有转入账户"
+                % posting.KIND_LABELS[kind]
+            )
+        if args.category is None:
+            return _usage_error(
+                "%s必须指定 --category，例如 支出·餐饮·午餐"
+                % posting.KIND_LABELS[kind]
+            )
+
+    entry = {
+        "kind": kind,
+        "date": args.date or add_flow.today_utc8(),
+        "amount": amount,
+        "account": args.account,
+        "summary": args.summary or "",
+        "note": args.note or "",
+    }
+    if kind == "transfer":
+        entry["to_account"] = args.to_account
+    else:
+        entry["category"] = args.category
+
+    cfg = config.load_config()
+    result = add_flow.execute(cfg, entry)
+    print(
+        "已记账：%s %.2f 元 · 账户 %s（日期 %s，明细 %s，更新 %d 项）"
+        % (
+            posting.KIND_LABELS[kind],
+            amount,
+            args.account,
+            entry["date"],
+            "、".join(result["created"]) or "无",
+            result["updated"],
+        )
+    )
+    return EXIT_OK
 
 
 def _cell_text(value: Any) -> str:
@@ -448,11 +556,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if args.command == "init":
             return _run_init(args)
+        if args.command == "add":
+            return _run_add(args)
         if args.command == "account":
             return _run_account(args)
         if args.command == "holding":
             return _run_holding(args)
         print("未知子命令：%s" % args.command, file=sys.stderr)
+        return EXIT_USAGE
+    except add_flow.PartialWriteError as exc:
+        print("记账部分失败：%s" % exc, file=sys.stderr)
+        print(
+            "已完成：%s" % ("、".join(exc.completed) or "无"),
+            file=sys.stderr,
+        )
+        print(
+            "未完成：%s" % ("、".join(exc.unfinished) or "无"),
+            file=sys.stderr,
+        )
+        print(
+            "请到飞书表格核对后手工补齐未完成步骤；明细可能已经写入。",
+            file=sys.stderr,
+        )
+        return EXIT_LARK
+    except posting.PostingError as exc:
+        print("参数错误：%s" % exc, file=sys.stderr)
         return EXIT_USAGE
     except init_flow.NotLoggedInError as exc:
         # 消息本身已是用户可读的登录引导，不再加前缀。
