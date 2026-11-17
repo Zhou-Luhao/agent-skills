@@ -1,0 +1,216 @@
+{
+  "tables": [
+    {
+      "name": "账户",
+      "fields": [
+        {"type": "text", "name": "账户名称"},
+        {
+          "type": "select",
+          "name": "类型",
+          "multiple": false,
+          "options": [
+            {"name": "现金"},
+            {"name": "微信支付宝"},
+            {"name": "银行卡"},
+            {"name": "理财"},
+            {"name": "负债"}
+          ]
+        },
+        {
+          "type": "number",
+          "name": "初始余额",
+          "style": {"type": "currency", "precision": 2, "currency_code": "CNY"}
+        },
+        {
+          "type": "number",
+          "name": "当前余额",
+          "style": {"type": "currency", "precision": 2, "currency_code": "CNY"}
+        },
+        {
+          "type": "number",
+          "name": "年利率",
+          "style": {"type": "plain", "percentage": true}
+        },
+        {
+          "type": "select",
+          "name": "还款方式",
+          "multiple": false,
+          "options": [
+            {"name": "等额本息"},
+            {"name": "等额本金"},
+            {"name": "随借随还"}
+          ]
+        },
+        {
+          "type": "select",
+          "name": "状态",
+          "multiple": false,
+          "options": [
+            {"name": "在用"},
+            {"name": "已销户"}
+          ]
+        },
+        {"type": "text", "name": "备注"}
+      ]
+    },
+    {
+      "name": "分类",
+      "fields": [
+        {"type": "text", "name": "分类"},
+        {
+          "type": "select",
+          "name": "类型",
+          "multiple": false,
+          "options": [
+            {"name": "收入"},
+            {"name": "支出"}
+          ]
+        },
+        {"type": "text", "name": "一级"},
+        {"type": "text", "name": "二级"}
+      ]
+    },
+    {
+      "name": "持仓",
+      "fields": [
+        {"type": "text", "name": "持仓名称"},
+        {"type": "text", "name": "代码"},
+        {
+          "type": "select",
+          "name": "品种",
+          "multiple": false,
+          "options": [
+            {"name": "股票"},
+            {"name": "基金"}
+          ]
+        },
+        {"type": "link", "name": "理财账户", "link_table": "账户"},
+        {"type": "number", "name": "当前份额", "style": {"type": "plain"}},
+        {
+          "type": "number",
+          "name": "成本价",
+          "style": {"type": "plain", "precision": 4}
+        },
+        {
+          "type": "number",
+          "name": "最新价",
+          "style": {"type": "plain", "precision": 4}
+        },
+        {
+          "type": "datetime",
+          "name": "最新价日期",
+          "style": {"format": "yyyy-MM-dd"}
+        },
+        {"type": "formula", "name": "市值", "expression": "[当前份额]*[最新价]"},
+        {
+          "type": "formula",
+          "name": "浮动盈亏",
+          "expression": "([最新价]-[成本价])*[当前份额]"
+        },
+        {
+          "type": "select",
+          "name": "状态",
+          "multiple": false,
+          "options": [
+            {"name": "持有"},
+            {"name": "已清仓"}
+          ]
+        },
+        {"type": "number", "name": "期初份额", "style": {"type": "plain"}},
+        {
+          "type": "number",
+          "name": "期初成本",
+          "style": {"type": "plain", "precision": 4}
+        }
+      ]
+    },
+    {
+      "name": "收支明细",
+      "fields": [
+        {"type": "text", "name": "摘要"},
+        {
+          "type": "datetime",
+          "name": "日期",
+          "style": {"format": "yyyy-MM-dd"}
+        },
+        {
+          "type": "select",
+          "name": "类型",
+          "multiple": false,
+          "options": [
+            {"name": "收入"},
+            {"name": "支出"},
+            {"name": "转账"}
+          ]
+        },
+        {
+          "type": "number",
+          "name": "金额",
+          "style": {"type": "plain", "precision": 2}
+        },
+        {"type": "link", "name": "账户", "link_table": "账户"},
+        {"type": "link", "name": "转入账户", "link_table": "账户"},
+        {"type": "link", "name": "分类", "link_table": "分类"},
+        {"type": "link", "name": "持仓", "link_table": "持仓"},
+        {
+          "type": "number",
+          "name": "成交价",
+          "style": {"type": "plain", "precision": 4}
+        },
+        {
+          "type": "number",
+          "name": "份额",
+          "style": {"type": "plain", "precision": 4}
+        },
+        {"type": "text", "name": "备注"},
+        {"type": "created_at", "name": "创建时间"}
+      ]
+    },
+    {
+      "name": "行情快照",
+      "fields": [
+        {"type": "text", "name": "代码-日期"},
+        {"type": "text", "name": "代码"},
+        {
+          "type": "datetime",
+          "name": "日期",
+          "style": {"format": "yyyy-MM-dd"}
+        },
+        {
+          "type": "number",
+          "name": "收盘价/净值",
+          "style": {"type": "plain", "precision": 4}
+        },
+        {
+          "type": "select",
+          "name": "状态",
+          "multiple": false,
+          "options": [
+            {"name": "已落"},
+            {"name": "待回补"},
+            {"name": "无数据"}
+          ]
+        },
+        {"type": "updated_at", "name": "更新时间"}
+      ]
+    },
+    {
+      "name": "资产快照",
+      "fields": [
+        {"type": "text", "name": "日期-账户"},
+        {
+          "type": "datetime",
+          "name": "日期",
+          "style": {"format": "yyyy-MM-dd"}
+        },
+        {"type": "link", "name": "账户", "link_table": "账户"},
+        {
+          "type": "number",
+          "name": "余额/市值",
+          "style": {"type": "plain", "precision": 2}
+        },
+        {"type": "text", "name": "备注"}
+      ]
+    }
+  ]
+}
