@@ -226,25 +226,91 @@ def _entry_kind(entry: Any) -> str:
     return kind
 
 
+_PNL_CATEGORIES = {
+    "股票": "收入·理财收益·股票收益",
+    "基金": "收入·理财收益·基金收益",
+}
+
+_IGNORED_FIELDS = {
+    "to_account": "转入账户（to_account）",
+    "from_account": "转出账户（from_account）",
+    "category": "分类（category）",
+    "holding": "持仓（holding）",
+    "price": "成交价（price）",
+    "shares": "份额（shares）",
+    "pnl_category": "已实现盈亏分类（pnl_category）",
+}
+
+
 def _reject_irrelevant(entry: dict, kind: str) -> None:
-    """收支不能带转入账户，转账不能带分类：宁可报错，也不静默丢弃参数。"""
+    """拒绝与 kind 无关的参数：宁可报错，也不静默丢弃用户输入。"""
     if kind == "transfer":
-        if _present(entry.get("category")):
-            raise posting.PostingError(
-                "转账不需要分类（category）：分类只用于收入/支出；请去掉分类参数"
-            )
+        _reject_fields(entry, kind, ("category", "from_account", "holding", "price", "shares"))
         return
-    if _present(entry.get("to_account")):
-        raise posting.PostingError(
-            "%s不需要转入账户（to_account）：只有转账（transfer）才有转入账户；"
-            "请确认记账类型" % posting.KIND_LABELS[kind]
+    if kind in ("income", "expense"):
+        _reject_fields(
+            entry, kind, ("to_account", "from_account", "holding", "price", "shares")
         )
+        return
+    if kind == "invest_buy":
+        _reject_fields(entry, kind, ("to_account", "category", "pnl_category"))
+        return
+    if kind == "invest_sell":
+        _reject_fields(entry, kind, ("from_account", "pnl_category"))
+        return
+    if kind == "dividend":
+        _reject_fields(
+            entry,
+            kind,
+            ("to_account", "from_account", "holding", "price", "shares"),
+        )
+
+
+def _reject_fields(entry: dict, kind: str, keys) -> None:
+    for key in keys:
+        if _present(entry.get(key)):
+            raise posting.PostingError(
+                "%s不需要%s；请去掉该参数，或确认记账类型"
+                % (posting.KIND_LABELS[kind], _IGNORED_FIELDS.get(key, key))
+            )
+
+
+def _resolve_holding_snapshot(
+    cfg: dict, entry: dict
+) -> Tuple[str, Dict[str, dict]]:
+    """解析持仓（代码/名称/record_id），返回 record_id 与单条持仓快照。"""
+    holding_ref = entry.get("holding")
+    if not _present(holding_ref):
+        raise posting.PostingError(
+            "理财买卖必须指定持仓（--holding 代码/名称/record_id）"
+        )
+    holding = master_data.resolve_holding(cfg, holding_ref)
+    record_id = holding["record_id"]
+    return record_id, {record_id: holding["fields"]}
+
+
+def _resolve_pnl_category(
+    cfg: dict, entry: dict, holding_fields: Dict[str, Any]
+) -> str:
+    """卖出按持仓品种路由盈亏分类；用户显式给 --category 时以用户为准。"""
+    category_ref = entry.get("category")
+    if not _present(category_ref):
+        breed = _cell_text(holding_fields.get("品种")).strip()
+        category_ref = _PNL_CATEGORIES.get(breed)
+        if category_ref is None:
+            raise posting.PostingError(
+                "无法按持仓品种确定已实现盈亏分类：品种「%s」；"
+                "请用 --category 显式指定收入分类" % (breed or "未填写")
+            )
+    record = _resolve_category_record(cfg, category_ref)
+    _check_category_direction("income", record, category_ref)
+    return record["record_id"]
 
 
 def _normalized_entry(
     cfg: dict, entry: dict
-) -> Tuple[Dict[str, Any], Dict[str, dict]]:
-    """解析名称 → record_id，返回只含该 kind 需要的键的 entry 与账户快照。"""
+) -> Tuple[Dict[str, Any], Dict[str, dict], Dict[str, dict]]:
+    """解析名称 → record_id，返回 entry、账户快照与持仓快照。"""
     kind = _entry_kind(entry)
     _reject_irrelevant(entry, kind)
 
@@ -262,6 +328,7 @@ def _normalized_entry(
         "summary": entry.get("summary") or "",
         "note": entry.get("note") or "",
     }
+    holdings: Dict[str, dict] = {}
 
     if kind == "transfer":
         target_ref = entry.get("to_account")
@@ -272,6 +339,20 @@ def _normalized_entry(
         target = master_data.resolve_account(cfg, target_ref)
         accounts[target["record_id"]] = target["fields"]
         normalized["to_account"] = target["record_id"]
+    elif kind in posting.INVEST_KINDS:
+        holding_id, holdings = _resolve_holding_snapshot(cfg, entry)
+        normalized["holding"] = holding_id
+        normalized["price"] = entry.get("price")
+        normalized["shares"] = entry.get("shares")
+    elif kind == "dividend":
+        category_ref = entry.get("category")
+        if not _present(category_ref):
+            raise posting.PostingError(
+                "理财分红必须指定分类（--category 收入·理财收益·分红）"
+            )
+        record = _resolve_category_record(cfg, category_ref)
+        _check_category_direction("income", record, category_ref)
+        normalized["pnl_category"] = record["record_id"]
     else:
         category_ref = entry.get("category")
         if not _present(category_ref):
@@ -283,7 +364,29 @@ def _normalized_entry(
         _check_category_direction(kind, record, category_ref)
         normalized["category"] = record["record_id"]
 
-    return normalized, accounts
+    if kind == "invest_buy":
+        source_ref = entry.get("from_account")
+        if not _present(source_ref):
+            raise posting.PostingError(
+                "理财买入必须指定转出账户（--from-account 银行卡/现金）"
+            )
+        source = master_data.resolve_account(cfg, source_ref)
+        accounts[source["record_id"]] = source["fields"]
+        normalized["from_account"] = source["record_id"]
+    elif kind == "invest_sell":
+        target_ref = entry.get("to_account")
+        if not _present(target_ref):
+            raise posting.PostingError(
+                "理财卖出必须指定转入账户（--to-account 银行卡/现金）"
+            )
+        target = master_data.resolve_account(cfg, target_ref)
+        accounts[target["record_id"]] = target["fields"]
+        normalized["to_account"] = target["record_id"]
+        normalized["pnl_category"] = _resolve_pnl_category(
+            cfg, entry, holdings[normalized["holding"]]
+        )
+
+    return normalized, accounts, holdings
 
 
 def _cell_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -325,9 +428,8 @@ def execute(
     返回 `{"created": [record_id...], "updated": 更新条数}`；
     写入中途任何 LarkError 都转成 `PartialWriteError`（带 completed/unfinished）。
     """
-    normalized, accounts = _normalized_entry(cfg, entry)
-    # 本任务只处理收支/转账；持仓快照供 Task 7 的投资分支使用。
-    plan = posting.plan_add(normalized, accounts, {})
+    normalized, accounts, holdings = _normalized_entry(cfg, entry)
+    plan = posting.plan_add(normalized, accounts, holdings)
 
     steps = [
         ("create", table_name, None, fields)

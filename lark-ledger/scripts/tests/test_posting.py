@@ -198,11 +198,12 @@ class ValidateEntryTest(PostingTestBase):
         self.assertIn("分类", str(raised.exception))
 
     def test_validate_rejects_unknown_kind(self):
+        # 投资/分红已支持，但未实现的 kind 仍必须被拒绝。
         with self.assertRaises(posting.PostingError) as raised:
             posting.validate_entry(
-                self.entry(kind="invest_buy"), self.accounts
+                self.entry(kind="not_a_kind"), self.accounts
             )
-        self.assertIn("invest_buy", str(raised.exception))
+        self.assertIn("not_a_kind", str(raised.exception))
 
     def test_validate_expense_rejects_to_account(self):
         # 把转账误写成支出时，不能悄悄只扣一个账户。

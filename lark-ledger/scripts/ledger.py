@@ -190,18 +190,39 @@ def _add_add_parser(subparsers) -> None:
     )
     add.add_argument(
         "--amount",
-        required=True,
+        default=None,
         type=float,
-        help="金额必须大于 0（方向由 --kind 或分类类型决定，不看金额符号）",
+        help=(
+            "金额必须大于 0（方向由 --kind 或分类类型决定，不看金额符号）；"
+            "收入/支出/分红必填，理财买入可用金额代替 --shares"
+        ),
     )
     add.add_argument("--account", required=True, help="账户名称或 record_id")
     add.add_argument(
-        "--to-account", default=None, help="转入账户（仅转账）"
+        "--to-account", default=None, help="转入账户（转账/理财卖出）"
     )
     add.add_argument(
         "--category",
         default=None,
-        help="分类全名，如 支出·餐饮·午餐（收入/支出必填，实时查分类表）",
+        help=(
+            "分类全名，如 支出·餐饮·午餐（收入/支出/分红必填；"
+            "理财卖出可选，缺省按品种自动路由盈亏分类）"
+        ),
+    )
+    add.add_argument(
+        "--holding", default=None, help="持仓代码/名称/record_id（理财买卖必填）"
+    )
+    add.add_argument(
+        "--price", type=float, default=None, help="成交价/净值（理财买卖必填）"
+    )
+    add.add_argument(
+        "--shares",
+        type=float,
+        default=None,
+        help="成交份额（理财买卖必填；买入也可用 --amount ÷ --price 换算）",
+    )
+    add.add_argument(
+        "--from-account", default=None, help="转出账户（理财买入必填）"
     )
     add.add_argument("--summary", default=None, help="摘要，如 午饭")
     add.add_argument("--note", default=None, help="备注")
@@ -275,13 +296,20 @@ def _run_add(args: argparse.Namespace) -> int:
         kind = args.kind
 
     if kind == "transfer":
+        if args.amount is None:
+            return _usage_error("转账必须指定 --amount（金额必须大于 0）")
         if args.to_account is None:
             return _usage_error("转账必须指定 --to-account（转入账户）")
         if args.category is not None:
             return _usage_error(
                 "转账不需要 --category：分类只用于收入/支出"
             )
-    else:
+    elif kind in ("income", "expense"):
+        if args.amount is None:
+            return _usage_error(
+                "%s必须指定 --amount（金额必须大于 0）"
+                % posting.KIND_LABELS[kind]
+            )
         if args.to_account is not None:
             return _usage_error(
                 "%s不需要 --to-account：只有转账才有转入账户"
@@ -292,28 +320,104 @@ def _run_add(args: argparse.Namespace) -> int:
                 "%s必须指定 --category，例如 支出·餐饮·午餐"
                 % posting.KIND_LABELS[kind]
             )
+    elif kind == "invest_buy":
+        if args.holding is None:
+            return _usage_error("理财买入必须指定 --holding（持仓代码/名称）")
+        if args.price is None:
+            return _usage_error("理财买入必须指定 --price（成交价/净值）")
+        if args.shares is None and args.amount is None:
+            return _usage_error(
+                "理财买入必须指定 --shares（份额）或用 --amount 按净值换算"
+            )
+        if args.from_account is None:
+            return _usage_error("理财买入必须指定 --from-account（转出账户）")
+        if args.to_account is not None:
+            return _usage_error("理财买入不需要 --to-account：份额买入由脚本记录")
+        if args.category is not None:
+            return _usage_error("理财买入不需要 --category：买卖明细类型固定为转账")
+    elif kind == "invest_sell":
+        if args.holding is None:
+            return _usage_error("理财卖出必须指定 --holding（持仓代码/名称）")
+        if args.price is None:
+            return _usage_error("理财卖出必须指定 --price（成交价/净值）")
+        if args.shares is None:
+            return _usage_error("理财卖出必须指定 --shares（卖出份额）")
+        if args.to_account is None:
+            return _usage_error("理财卖出必须指定 --to-account（转入账户）")
+        if args.amount is not None:
+            return _usage_error(
+                "理财卖出不需要 --amount：到账金额由脚本按 成交价×份额 计算"
+            )
+        if args.from_account is not None:
+            return _usage_error(
+                "理财卖出不需要 --from-account：资金从理财账户转出"
+            )
+    elif kind == "dividend":
+        if args.amount is None:
+            return _usage_error("理财分红必须指定 --amount（分红金额）")
+        if args.category is None:
+            return _usage_error(
+                "理财分红必须指定 --category，例如 收入·理财收益·分红"
+            )
+        if (
+            args.holding is not None
+            or args.price is not None
+            or args.shares is not None
+            or args.from_account is not None
+            or args.to_account is not None
+        ):
+            return _usage_error(
+                "理财分红只需要 --amount/--account/--category："
+                "买卖字段请用于 --kind invest_buy|invest_sell"
+            )
 
     entry = {
         "kind": kind,
         "date": args.date or add_flow.today_utc8(),
-        "amount": args.amount,
         "account": args.account,
         "summary": args.summary or "",
         "note": args.note or "",
     }
     if kind == "transfer":
+        entry["amount"] = args.amount
         entry["to_account"] = args.to_account
-    else:
+    elif kind in ("income", "expense"):
+        entry["amount"] = args.amount
+        entry["category"] = args.category
+    elif kind == "invest_buy":
+        entry["holding"] = args.holding
+        entry["price"] = args.price
+        entry["from_account"] = args.from_account
+        if args.shares is not None:
+            entry["shares"] = args.shares
+        if args.amount is not None:
+            entry["amount"] = args.amount
+    elif kind == "invest_sell":
+        entry["holding"] = args.holding
+        entry["price"] = args.price
+        entry["shares"] = args.shares
+        entry["to_account"] = args.to_account
+        if args.category is not None:
+            entry["category"] = args.category
+    elif kind == "dividend":
+        entry["amount"] = args.amount
         entry["category"] = args.category
 
     if cfg is None:
         cfg = config.load_config()
     result = add_flow.execute(cfg, entry)
+    display_amount = args.amount
+    if (
+        kind in posting.INVEST_KINDS
+        and args.price is not None
+        and args.shares is not None
+    ):
+        display_amount = args.price * args.shares
     print(
         "已记账：%s %.2f 元 · 账户 %s（日期 %s，明细 %s，更新 %d 项）"
         % (
             posting.KIND_LABELS[kind],
-            args.amount,
+            display_amount,
             args.account,
             entry["date"],
             "、".join(result["created"]) or "无",
