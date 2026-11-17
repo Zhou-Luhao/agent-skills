@@ -204,6 +204,34 @@ class ValidateEntryTest(PostingTestBase):
             )
         self.assertIn("invest_buy", str(raised.exception))
 
+    def test_validate_expense_rejects_to_account(self):
+        # 把转账误写成支出时，不能悄悄只扣一个账户。
+        entry = self.entry(to_account="acc_bank")
+
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.validate_entry(entry, self.accounts)
+        self.assertIn("转入账户", str(raised.exception))
+
+    def test_validate_transfer_rejects_category(self):
+        entry = self.entry(
+            kind="transfer",
+            to_account="acc_bank",
+            category="cat_food",
+        )
+
+        with self.assertRaises(posting.PostingError) as raised:
+            posting.validate_entry(entry, self.accounts)
+        self.assertIn("分类", str(raised.exception))
+
+    def test_validate_rejects_bad_date(self):
+        for bad_date in (None, "", "2026/11/17", "20261117", "2026-02-30"):
+            with self.subTest(date=bad_date):
+                with self.assertRaises(posting.PostingError) as raised:
+                    posting.validate_entry(
+                        self.entry(date=bad_date), self.accounts
+                    )
+                self.assertIn("日期", str(raised.exception))
+
 
 class HoldingMathTest(unittest.TestCase):
     def test_weighted_cost(self):
@@ -212,9 +240,17 @@ class HoldingMathTest(unittest.TestCase):
     def test_weighted_cost_rounds_four(self):
         self.assertEqual(posting.weighted_cost(3, 1, 1, 2), 1.25)
 
+    def test_weighted_cost_rounds_beyond_four_decimals(self):
+        # 5/3 = 1.66666...，必须截到 4 位。
+        self.assertEqual(posting.weighted_cost(1, 1, 2, 2), 1.6667)
+
     def test_realized_pnl(self):
         self.assertEqual(posting.realized_pnl(1200, 100, 10), 200.0)
         self.assertEqual(posting.realized_pnl(800, 100, 10), -200.0)
+
+    def test_realized_pnl_rounds_two_decimals(self):
+        # 3.333 − 1.111×2 = 1.111，必须截到 2 位。
+        self.assertEqual(posting.realized_pnl(3.333, 1.111, 2), 1.11)
 
     def test_group_tag_shape(self):
         tag = posting.group_tag()

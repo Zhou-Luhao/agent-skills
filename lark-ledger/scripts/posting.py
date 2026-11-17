@@ -11,16 +11,22 @@
   无需按账户类型分支。
 """
 
+import datetime
 import math
 import random
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Any, Callable, Dict, List, Tuple
 
 # 表名是 WritePlan 的键，集中在此便于下游引用。
 ENTRY_TABLE = "收支明细"
 ACCOUNT_TABLE = "账户"
 
-# entry["kind"] → 收支明细「类型」单选值。
+# 本层支持的 kind 单独成集：KIND_LABELS 只是「明细类型」的显示名，
+# Task 7/8 会增加新的 label，但不能因此让本层接受尚未实现的 kind。
+SUPPORTED_KINDS = ("income", "expense", "transfer")
 KIND_LABELS = {"income": "收入", "expense": "支出", "transfer": "转账"}
+
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 WritePlan = Dict[str, List[Any]]
 
@@ -46,10 +52,12 @@ def _kind(entry: Any) -> str:
     if not isinstance(entry, dict):
         raise PostingError("记账参数必须是 dict，实际是 %r" % (entry,))
     kind = entry.get("kind")
-    if kind not in KIND_LABELS:
+    if kind not in SUPPORTED_KINDS:
+        supported = " / ".join(
+            "%s（%s）" % (name, KIND_LABELS[name]) for name in SUPPORTED_KINDS
+        )
         raise PostingError(
-            "不支持的记账类型 %r；只能是 income（收入）/ expense（支出）/ "
-            "transfer（转账）" % (kind,)
+            "不支持的记账类型 %r；当前只支持 %s" % (kind, supported)
         )
     return kind
 
@@ -100,28 +108,94 @@ def _same_account_error(account_id: str, accounts: Dict[str, dict]) -> PostingEr
     )
 
 
-def validate_entry(entry: dict, accounts: Dict[str, dict]) -> None:
-    """校验一笔收支/转账；不合法时抛 PostingError（ValueError 子类）。
+def _present(value: Any) -> bool:
+    """字段是否被真正赋值：None、空串、纯空白都视为未提供。"""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
 
-    只校验本层能确定的事：类型、金额、账户存在性、转账目标、收支分类；
-    分类/账户的名称解析与存在性由上游 I/O 层先完成，这里收 record_id。
-    """
-    kind = _kind(entry)
-    _amount(entry)
-    account = _account_id(entry, "account", "账户", accounts)
 
-    if kind == "transfer":
-        target = _account_id(entry, "to_account", "转入账户", accounts)
-        if target == account:
-            raise _same_account_error(account, accounts)
-        return
+def _entry_date(entry: dict) -> str:
+    """日期只接受 "YYYY-MM-DD"（不在这里补今天，默认值由 add_flow 负责）。"""
+    value = entry.get("date")
+    if not isinstance(value, str) or not _DATE_PATTERN.fullmatch(value):
+        raise PostingError(
+            "日期必须是 YYYY-MM-DD 格式的字符串，实际是 %r；例如 2026-11-17"
+            % (value,)
+        )
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        raise PostingError(
+            "日期 %r 不存在；请检查月份和日期（例如 2026-02-30 不合法）"
+            % (value,)
+        )
+    return value
 
+
+def _reject_present(entry: dict, key: str, message: str) -> None:
+    if _present(entry.get(key)):
+        raise PostingError(message)
+
+
+def _validate_cash(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+) -> None:
+    """收入/支出：必有分类、不得带转入账户。"""
+    _reject_present(
+        entry,
+        "to_account",
+        "%s不需要转入账户（to_account）：只有转账（transfer）才有转入账户；"
+        "请确认记账类型" % KIND_LABELS[kind],
+    )
     category = entry.get("category")
     if not isinstance(category, str) or not category.strip():
         raise PostingError(
             "%s必须指定分类（category），例如「支出·餐饮·午餐」"
             % KIND_LABELS[kind]
         )
+
+
+def _validate_transfer(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+) -> None:
+    """转账：必有不同转入账户、不得带分类。"""
+    target = _account_id(entry, "to_account", "转入账户", accounts)
+    if target == account:
+        raise _same_account_error(account, accounts)
+    _reject_present(
+        entry,
+        "category",
+        "转账不需要分类（category）：分类只用于收入/支出；请去掉分类参数",
+    )
+
+
+VALIDATORS: Dict[str, Callable[..., None]] = {
+    "income": _validate_cash,
+    "expense": _validate_cash,
+    "transfer": _validate_transfer,
+}
+
+
+def validate_entry(entry: dict, accounts: Dict[str, dict]) -> None:
+    """校验一笔收支/转账；不合法时抛 PostingError（ValueError 子类）。
+
+    只校验本层能确定的事：类型、日期、金额、账户存在性、转账目标、收支分类；
+    分类/账户的名称解析与存在性由上游 I/O 层先完成，这里收 record_id。
+    """
+    kind = _kind(entry)
+    _entry_date(entry)
+    _amount(entry)
+    account = _account_id(entry, "account", "账户", accounts)
+    VALIDATORS[kind](kind, entry, accounts, account)
 
 
 def balance_deltas(entry: dict, accounts: Dict[str, dict]) -> Dict[str, float]:
@@ -158,6 +232,55 @@ def _current_balance(account_id: str, accounts: Dict[str, dict]) -> float:
     )
 
 
+def _detail_fields(
+    kind: str,
+    entry: dict,
+    account: str,
+    amount: float,
+) -> Dict[str, Any]:
+    """收支明细的公共字段；日期保持字符串，毫秒转换留给 I/O 层。"""
+    return {
+        "摘要": entry.get("summary") or "",
+        "日期": entry.get("date"),
+        "类型": [KIND_LABELS[kind]],
+        "金额": amount,
+        "账户": [{"id": account}],
+        "备注": entry.get("note") or "",
+    }
+
+
+def _plan_cash(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+    amount: float,
+) -> Dict[str, Any]:
+    fields = _detail_fields(kind, entry, account, amount)
+    fields["分类"] = [{"id": entry["category"].strip()}]
+    return fields
+
+
+def _plan_transfer(
+    kind: str,
+    entry: dict,
+    accounts: Dict[str, dict],
+    account: str,
+    amount: float,
+) -> Dict[str, Any]:
+    fields = _detail_fields(kind, entry, account, amount)
+    target = _account_id(entry, "to_account", "转入账户", accounts)
+    fields["转入账户"] = [{"id": target}]
+    return fields
+
+
+PLANNERS: Dict[str, Callable[..., Dict[str, Any]]] = {
+    "income": _plan_cash,
+    "expense": _plan_cash,
+    "transfer": _plan_transfer,
+}
+
+
 def plan_add(
     entry: dict,
     accounts: Dict[str, dict],
@@ -173,21 +296,7 @@ def plan_add(
     kind = _kind(entry)
     amount = _amount(entry)
     account = _account_id(entry, "account", "账户", accounts)
-
-    fields: Dict[str, Any] = {
-        "摘要": entry.get("summary") or "",
-        "日期": entry.get("date"),
-        "类型": [KIND_LABELS[kind]],
-        "金额": amount,
-        "账户": [{"id": account}],
-    }
-    if kind == "transfer":
-        target = _account_id(entry, "to_account", "转入账户", accounts)
-        fields["转入账户"] = [{"id": target}]
-    else:
-        category = entry.get("category").strip()
-        fields["分类"] = [{"id": category}]
-    fields["备注"] = entry.get("note") or ""
+    fields = PLANNERS[kind](kind, entry, accounts, account, amount)
 
     updates: List[Tuple[str, str, dict]] = []
     for account_id, delta in balance_deltas(entry, accounts).items():
