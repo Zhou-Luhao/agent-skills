@@ -53,7 +53,12 @@ class RunCliTest(unittest.TestCase):
         )
         self.assertEqual(
             run.call_args.kwargs,
-            {"capture_output": True, "text": True, "timeout": 60},
+            {
+                "capture_output": True,
+                "text": True,
+                "encoding": "utf-8",
+                "timeout": 60,
+            },
         )
 
     @mock.patch("lark.subprocess.run")
@@ -97,6 +102,20 @@ class RunCliTest(unittest.TestCase):
         self.assertIn("lark-cli", str(ctx.exception))
         self.assertEqual(
             ctx.exception.payload["args"], ["lark-cli", "auth", "status", "--format", "json"]
+        )
+
+    @mock.patch("lark.subprocess.run")
+    def test_unicode_decode_error_raises_lark_error(self, run):
+        run.side_effect = UnicodeDecodeError(
+            "utf-8", b"\xff", 0, 1, "invalid start byte"
+        )
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            lark.run_cli(["base", "+table-list"])
+        self.assertIn("invalid start byte", str(ctx.exception))
+        self.assertEqual(
+            ctx.exception.payload["args"],
+            ["lark-cli", "base", "+table-list", "--format", "json"],
         )
 
     @mock.patch("lark.subprocess.run")
@@ -312,6 +331,15 @@ class ListTablesTest(unittest.TestCase):
 
         self.assertEqual(lark.list_tables("app1"), [])
 
+    @mock.patch("lark.subprocess.run")
+    def test_missing_tables_key_raises_with_payload(self, run):
+        payload = {"total": 0}
+        run.return_value = _proc(_envelope(payload))
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            lark.list_tables("app1")
+        self.assertEqual(ctx.exception.payload, payload)
+
 
 class ListFieldsTest(unittest.TestCase):
     @mock.patch("lark.subprocess.run")
@@ -351,6 +379,15 @@ class ListFieldsTest(unittest.TestCase):
         run.return_value = _proc(_envelope({"fields": [], "total": 0}))
 
         self.assertEqual(lark.list_fields("app1", "tbl1"), [])
+
+    @mock.patch("lark.subprocess.run")
+    def test_missing_fields_key_raises_with_payload(self, run):
+        payload = {"total": 0}
+        run.return_value = _proc(_envelope(payload))
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            lark.list_fields("app1", "tbl1")
+        self.assertEqual(ctx.exception.payload, payload)
 
 
 class CreateRecordsTest(unittest.TestCase):
@@ -584,6 +621,16 @@ class SearchTest(unittest.TestCase):
 
         self.assertEqual(len(result), 201)
         self.assertEqual(_flag(_cmd(run, 1), "--limit"), "5")
+
+    @mock.patch("lark.subprocess.run")
+    def test_empty_rows_without_record_id_list(self, run):
+        for payload in (
+            {"data": [], "fields": ["日期"], "has_more": False},
+            {"data": [], "fields": ["日期"], "record_id_list": None, "has_more": False},
+        ):
+            with self.subTest(payload=payload):
+                run.return_value = _proc(_envelope(payload))
+                self.assertEqual(lark.search_records("app1", "tbl1"), [])
 
     @mock.patch("lark.subprocess.run")
     def test_zero_limit_skips_cli(self, run):

@@ -72,11 +72,16 @@ def run_cli(args: List[str]) -> dict:
     command = [CLI, *args, "--format", "json"]
     try:
         proc = subprocess.run(
-            command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError) as exc:
         raise LarkError(
-            "执行 lark-cli 失败：%s" % exc, {"args": command}
+            "执行 lark-cli 失败：%s" % exc,
+            {"args": command, "error": str(exc)},
         ) from exc
 
     stdout = (proc.stdout or "").strip()
@@ -112,12 +117,21 @@ def auth_ok() -> bool:
     command = [CLI, "auth", "status", "--json"]
     try:
         proc = subprocess.run(
-            command, capture_output=True, text=True, timeout=TIMEOUT_SECONDS
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=TIMEOUT_SECONDS,
         )
         if proc.returncode != 0:
             return False
         payload = json.loads((proc.stdout or "").strip())
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
         return False
     if not isinstance(payload, dict):
         return False
@@ -223,10 +237,17 @@ def create_table(app_token: str, name: str, fields: List[dict]) -> str:
 
 def _items(data: dict, key: str) -> List[dict]:
     for name in (key, "items"):
-        value = data.get(name)
-        if isinstance(value, list):
+        if name in data:
+            value = data[name]
+            if not isinstance(value, list):
+                raise LarkError(
+                    "lark-cli 返回的 %s 不是列表：%s" % (name, _json_arg(data)),
+                    data,
+                )
             return [dict(item) for item in value if isinstance(item, dict)]
-    return []
+    raise LarkError(
+        "lark-cli 返回缺少 %s/items 列表：%s" % (key, _json_arg(data)), data
+    )
 
 
 def _with_id_alias(item: dict, alias: str) -> dict:
@@ -362,12 +383,16 @@ def _records_from_matrix(data: dict) -> List[dict]:
     rows = data.get("data")
     field_names = data.get("fields")
     record_ids = data.get("record_id_list")
-    if (
-        not isinstance(rows, list)
-        or not isinstance(field_names, list)
-        or not isinstance(record_ids, list)
-        or len(rows) != len(record_ids)
-    ):
+    if not isinstance(rows, list) or not isinstance(field_names, list):
+        raise LarkError(
+            "lark-cli 记录输出缺少 data/fields/record_id_list：%s"
+            % _json_arg(data),
+            data,
+        )
+    # 空表时 CLI 可能连 record_id_list 都不返回，这仍是合法的零行结果。
+    if record_ids is None and not rows:
+        record_ids = []
+    if not isinstance(record_ids, list) or len(rows) != len(record_ids):
         raise LarkError(
             "lark-cli 记录输出缺少 data/fields/record_id_list：%s"
             % _json_arg(data),
