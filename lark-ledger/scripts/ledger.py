@@ -147,10 +147,10 @@ def _add_holding_parsers(subparsers) -> None:
     )
     edit.add_argument("--account", default=None, help="所属理财账户名称或 record_id")
     edit.add_argument(
-        "--shares", type=float, default=None, help="当前份额（同时改期初份额）"
+        "--shares", type=float, default=None, help="当前份额（只改当前值）"
     )
     edit.add_argument(
-        "--cost", type=float, default=None, help="成本价（同时改期初成本）"
+        "--cost", type=float, default=None, help="成本价（只改当前值）"
     )
     edit.add_argument(
         "--opening-shares", type=float, default=None, help="只改期初份额"
@@ -348,10 +348,8 @@ def _holding_edit_fields(args: argparse.Namespace) -> dict:
         fields["理财账户"] = args.account
     if args.shares is not None:
         fields["当前份额"] = args.shares
-        fields["期初份额"] = args.shares
     if args.cost is not None:
         fields["成本价"] = args.cost
-        fields["期初成本"] = args.cost
     if args.opening_shares is not None:
         fields["期初份额"] = args.opening_shares
     if args.opening_cost is not None:

@@ -60,6 +60,8 @@ _HOLDING_ALIASES = {
     "code": "代码",
     "kind": "品种",
     "account": "理财账户",
+    "shares": "当前份额",
+    "cost": "成本价",
     "status": "状态",
     "opening_shares": "期初份额",
     "opening_cost": "期初成本",
@@ -210,6 +212,16 @@ def _choice(value: Any, allowed, label: str) -> str:
     return value
 
 
+def _rate_fraction(value: Any) -> float:
+    """校验按小数传入的年利率：4.2%（0.042）合法，4.2 几乎必然是百分数误传。"""
+    rate = _number(value, "年利率")
+    if abs(rate) > 1:
+        raise MasterDataError("年利率按小数传入：4.2% 传 0.042")
+    if rate < 0:
+        raise MasterDataError("年利率不能为负数，实际是 %r" % (value,))
+    return rate
+
+
 def _created_id(record_ids: List[str], label: str) -> str:
     if len(record_ids) != 1 or not isinstance(record_ids[0], str) or not record_ids[0]:
         raise MasterDataError(
@@ -233,7 +245,8 @@ def account_add(
 ) -> str:
     """新增账户，返回 record_id；初始余额与当前余额都写成 opening。
 
-    `rate` 是存储用小数（4.2% 传 0.042）；负债的 opening 传负数。
+    `rate` 是存储用小数（4.2% 传 0.042），绝对值 > 1 视为百分数误传；
+    负债的 opening 传负数。
     """
     opening_value = _number(opening, "初始余额")
     fields: Dict[str, Any] = {
@@ -244,7 +257,7 @@ def account_add(
         "状态": ["在用"],
     }
     if rate is not None:
-        fields["年利率"] = _number(rate, "年利率", non_negative=True)
+        fields["年利率"] = _rate_fraction(rate)
     if repay is not None:
         fields["还款方式"] = [_choice(repay, REPAY_METHODS, "还款方式")]
 
@@ -274,7 +287,7 @@ def _account_value(name: str, value: Any) -> Any:
     if name in ("初始余额", "当前余额"):
         return _number(value, name)
     if name == "年利率":
-        return _number(value, "年利率", non_negative=True)
+        return _rate_fraction(value)
     if name == "还款方式":
         return [_choice(value, REPAY_METHODS, "还款方式")]
     if name == "状态":
@@ -355,18 +368,7 @@ def holding_add(
 def _holding_fields(cfg: dict, raw: Dict[str, Any]) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     for key, value in raw.items():
-        # shares / cost 是“主数据口径”的便捷别名：当前值与期初值一起改。
-        if key == "shares":
-            number = _number(value, "当前份额", non_negative=True)
-            fields["当前份额"] = number
-            fields["期初份额"] = number
-            continue
-        if key == "cost":
-            number = _number(value, "成本价", non_negative=True)
-            fields["成本价"] = number
-            fields["期初成本"] = number
-            continue
-
+        # shares / cost 只改当前值；期初基线走 opening_shares / opening_cost。
         name = _HOLDING_ALIASES.get(key, key)
         if name not in HOLDING_WRITABLE:
             raise MasterDataError(

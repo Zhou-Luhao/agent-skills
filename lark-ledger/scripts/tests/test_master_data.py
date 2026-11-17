@@ -273,6 +273,19 @@ class AccountTest(MasterDataTestBase):
             )
         self.assertFalse(self.create_records.called)
 
+    def test_account_add_rejects_percent_rate(self):
+        with self.assertRaises(master_data.MasterDataError) as caught:
+            master_data.account_add(self.cfg, "房贷2", "负债", -1, rate=4.2)
+
+        self.assertIn("年利率按小数传入：4.2% 传 0.042", str(caught.exception))
+        self.assertFalse(self.create_records.called)
+
+    def test_account_edit_rejects_percent_rate(self):
+        with self.assertRaises(master_data.MasterDataError) as caught:
+            master_data.account_edit(self.cfg, "房贷", 年利率=4.2)
+
+        self.assertIn("年利率按小数传入：4.2% 传 0.042", str(caught.exception))
+
     def test_account_edit_updates_only_named_fields(self):
         master_data.account_edit(
             self.cfg, "招行工资卡", 初始余额=2000, 备注="工资卡"
@@ -351,16 +364,16 @@ class HoldingTest(MasterDataTestBase):
                 self.cfg, "X", "x1", "债券", "华泰证券", 1, 1
             )
 
-    def test_holding_edit_updates_shares_and_cost(self):
+    def test_holding_edit_shares_and_cost_are_current_only(self):
         master_data.holding_edit(
             self.cfg, "sh600519", shares=150, cost=1600
         )
 
         fields = self._record("tbl_holding", "recH1")
         self.assertEqual(fields["当前份额"], 150)
-        self.assertEqual(fields["期初份额"], 150)
+        self.assertEqual(fields["期初份额"], 100)
         self.assertEqual(fields["成本价"], 1600)
-        self.assertEqual(fields["期初成本"], 1600)
+        self.assertEqual(fields["期初成本"], 1500)
         self.assertEqual(fields["品种"], ["股票"])
 
     def test_holding_edit_account_writes_link(self):
@@ -531,6 +544,27 @@ class LedgerCliTest(MasterDataTestBase):
         self.assertEqual(fields["期初份额"], 200)
         self.assertEqual(fields["理财账户"], [{"id": "recA3"}])
         self.assertIn("宁德时代", out.getvalue())
+
+    def test_holding_edit_cli_shares_then_opening(self):
+        with captured_output() as (out, err):
+            code = ledger.main(
+                ["holding", "edit", "sh600519", "--shares", "120"]
+            )
+
+        self.assertEqual(code, 0)
+        fields = self._record("tbl_holding", "recH1")
+        self.assertEqual(fields["当前份额"], 120)
+        self.assertEqual(fields["期初份额"], 100)
+
+        with captured_output() as (out, err):
+            code = ledger.main(
+                ["holding", "edit", "sh600519", "--opening-shares", "150"]
+            )
+
+        self.assertEqual(code, 0)
+        fields = self._record("tbl_holding", "recH1")
+        self.assertEqual(fields["当前份额"], 120)
+        self.assertEqual(fields["期初份额"], 150)
 
     def test_holding_list_cli_prints_table(self):
         with captured_output() as (out, err):
