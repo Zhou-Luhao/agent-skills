@@ -181,6 +181,47 @@ class PeriodMarkdownTest(unittest.TestCase):
         self.assertIn("缺失数据域", html)
 
 
+class ChineseLabelsTest(unittest.TestCase):
+    """评分构成与缺失数据域必须显示中文，API 原始键名不得进入产物。"""
+
+    CONTRIB_ZH = (
+        # sleep
+        "深睡", "睡眠效率", "入睡耗时", "REM 睡眠", "安稳度", "睡眠时机", "总睡眠时长",
+        # readiness
+        "活动平衡", "体温", "HRV 平衡", "前日活动", "前夜睡眠", "恢复指数",
+        "静息心率", "睡眠平衡", "睡眠规律性",
+        # activity
+        "达成每日目标", "每小时活动", "恢复时间", "保持活跃", "训练频率", "训练量",
+    )
+    CONTRIB_RAW = (
+        "deep_sleep", "efficiency", "latency", "rem_sleep", "restfulness",
+        "timing", "total_sleep", "activity_balance", "body_temperature",
+        "hrv_balance", "previous_day_activity", "previous_night",
+        "recovery_index", "resting_heart_rate", "sleep_balance",
+        "sleep_regularity", "meet_daily_targets", "move_every_hour",
+        "recovery_time", "stay_active", "training_frequency", "training_volume",
+    )
+
+    def test_contributors_render_chinese(self):
+        html = render.render_html(_daily())
+        for label in self.CONTRIB_ZH:
+            self.assertIn(label, html)
+
+    def test_contributor_raw_keys_absent(self):
+        html = render.render_html(_daily())
+        for raw in self.CONTRIB_RAW:
+            self.assertNotIn(raw, html)
+
+    def test_missing_domains_render_chinese(self):
+        docs = {k: v for k, v in FIX.items()
+                if k not in ("daily_spo2", "daily_stress", "daily_resilience",
+                             "vO2_max", "sleep_time")}
+        html = render.render_html(aggregate.build_daily(docs, D(2026, 11, 10)))
+        self.assertIn("缺失数据域（当日无数据）：血氧、压力、恢复力、最大摄氧量、就寝建议", html)
+        for raw in ("spo2、", "stress、", "resilience", "vo2max", "sleep_time"):
+            self.assertNotIn(raw, html)
+
+
 class CredentialScanTest(unittest.TestCase):
     """M12: 规格要求「全产物」不得含凭据。"""
 
