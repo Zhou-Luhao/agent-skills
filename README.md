@@ -13,6 +13,7 @@ Docs are in Chinese; each skill's `README.md` states its output language.
 | 技能 | 说明 | 依赖 |
 |---|---|---|
 | [`oura`](oura/README.md) | Oura Ring data query & health reports — all 19 API endpoints, day/week/month visual reports (self-contained HTML + Markdown). 拉取睡眠、准备度、活动、血氧、压力等全部 19 个端点，按维度 × 时间窗查询 | Python 3.9+ · stdlib only |
+| [`lark-ledger`](lark-ledger/README.md) | 飞书多维表格个人记账 — 对话记账、账户/持仓/负债管理、行情自动回补、周/月报（HTML+MD） | lark-cli · Python 3.9+ stdlib |
 
 ## 仓库结构
 
