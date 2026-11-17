@@ -21,8 +21,6 @@ import quotes_flow
 import snapshot_flow
 
 CATEGORY_TABLE = "分类"
-ENTRY_TABLE = posting.ENTRY_TABLE
-ACCOUNT_TABLE = posting.ACCOUNT_TABLE
 # 贷款利息的缺省分类（spec：房贷/车贷利息统一归 支出·金融·利息支出）。
 DEFAULT_INTEREST_CATEGORY = "支出·金融·利息支出"
 

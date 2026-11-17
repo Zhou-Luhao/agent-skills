@@ -27,7 +27,7 @@ python3 scripts/ledger.py <子命令> [参数]
 
 ## 前置检查（每次会话先做一次）
 
-1. `lark-cli auth status`：未登录就引导用户执行 `lark-cli auth login --domain base,wiki,drive`，完成后再继续。
+1. `lark-cli auth status`：未登录时不要直接跑 `auth login`（它会阻塞等待浏览器授权）；请用户在自己的终端执行 `lark-cli auth login --domain base,wiki,drive`，完成后再继续。
 2. 检查本地配置 `~/.lark-ledger/config.json` 是否存在：
    - 不存在 → 先跑 `python3 scripts/ledger.py init`；默认在飞书「我的文档库」创建 Base《个人账本》并建 6 张表、写入预置分类。
    - 存在 → 不要重复 init（脚本会走校验分支，只校验不重建）；直接执行用户要的子命令。

@@ -244,7 +244,7 @@ class ReportFlowTest(unittest.TestCase):
         self.assertIn("| 2026-10-10 |", md)
         self.assertNotIn("| 2026-11-18 |", md)
         self.assertNotIn("-291,000.00", md)
-        self.assertIn("| 当前净资产 | -280,000.00 |", md)
+        self.assertIn("| 期末净资产 | -280,000.00 |", md)
 
     def test_report_omits_live_point_for_future_period(self):
         # 未来锚点：今天早于期间，不能把今天的点排到曲线最前面。

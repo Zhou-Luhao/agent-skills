@@ -31,6 +31,15 @@ class NotLoggedInError(RuntimeError):
     """lark-cli 没有以用户身份登录。"""
 
 
+class InitResult(dict):
+    """init 结果：既是落盘/复用的配置，也带本次是新建还是校验的信息。"""
+
+    def __init__(self, cfg: dict, created: bool, base_name: str) -> None:
+        super().__init__(cfg)
+        self.created = created
+        self.base_name = base_name
+
+
 def _load_json(path: pathlib.Path, what: str):
     try:
         text = path.read_text(encoding="utf-8")
@@ -90,7 +99,7 @@ def _category_records(categories: List[dict]) -> List[dict]:
     return [
         {
             "分类": category_full_name(entry),
-            "类型": entry["类型"],
+            "类型": [entry["类型"]],
             "一级": entry["一级"],
             "二级": entry.get("二级") or "",
         }
@@ -209,10 +218,34 @@ def _collect_field_ids(app_token: str, cfg: dict, schema: dict) -> None:
     )
 
 
+def _remove_stray_tables(app_token: str, schema: dict) -> None:
+    """删掉新建 Base 附带的平台默认表，保证最终只有 schema 里的 6 张表。
+
+    `base +base-create` / `wiki +node-create` 都会先建一张默认表；这里在
+    建 schema 表之前清掉它。只用于全新 Base（刚由 init 创建），不会碰既有账本。
+    """
+    schema_names = {table["name"] for table in schema["tables"]}
+    for item in lark.list_tables(app_token):
+        name = _table_name(item)
+        if name in schema_names:
+            continue
+        table_id = item.get("table_id") or item.get("id")
+        if not isinstance(table_id, str) or not table_id:
+            raise InitError(
+                "Base 的默认表缺少 table_id，无法清理：%r" % (item,)
+            )
+        lark.delete_table(app_token, table_id)
+
+
 def _partial_note(
     app_token: str, node_token: Optional[str], created_tables: List[str]
 ) -> str:
     tables = "、".join(created_tables) if created_tables else "无"
+    if not app_token:
+        return (
+            "init 在创建 Base 阶段失败，未拿到 app_token，无法确认是否已留下"
+            "空 Base；请到飞书核对后删除或补配置再重试"
+        )
     return (
         "Base 已创建（app_token=%s，node_token=%s，已建表 %s），init 未完成；"
         "请删除该 Base 或手工补配置后重试（直接重跑 init 会再建一个 Base）"
@@ -235,17 +268,24 @@ def _raise_with_partial_state(exc: Exception, note: str) -> None:
 def _create_all(
     schema: dict, categories: List[dict], base_name: str, folder_token: Optional[str]
 ) -> dict:
-    if folder_token:
-        app_token = lark.create_base_folder(base_name, folder_token)
-        node_token = None
-    else:
-        created = lark.create_base_library(base_name)
-        app_token = created["app_token"]
-        node_token = created["node_token"]
-
+    app_token = ""
+    node_token: Optional[str] = None
     created_tables: List[str] = []
     try:
+        # Base 创建也放在 try 里：create 返回前失败时可能已经留下空 Base，
+        # 由 _raise_with_partial_state 统一交代。
+        if folder_token:
+            app_token = lark.create_base_folder(base_name, folder_token)
+        else:
+            created = lark.create_base_library(base_name)
+            app_token = created["app_token"]
+            node_token = created["node_token"]
+
+        # 平台建 Base 时会附带一张默认表；先清掉，保证最终正好 6 张 schema 表。
+        _remove_stray_tables(app_token, schema)
+
         cfg = config.empty_config(app_token, node_token)
+        cfg["base_name"] = base_name
         # 先建齐 6 张表（link 只指向更早的表），字段 id 留到最后统一回读。
         for table in schema["tables"]:
             name = table["name"]
@@ -273,8 +313,8 @@ def _create_all(
 
 def run_init(
     folder_token: Optional[str] = None, base_name: str = DEFAULT_BASE_NAME
-) -> dict:
-    """建账本（或在已有配置上校验），返回落盘/复用的配置字典。"""
+) -> InitResult:
+    """建账本（或在已有配置上校验），返回配置 + created/base_name 状态。"""
     if not lark.auth_ok():
         raise NotLoggedInError(
             "lark-cli 未登录：请先在终端执行 `lark-cli auth login`"
@@ -285,5 +325,15 @@ def run_init(
     # 首次 init 与否只看配置文件是否存在：存在但解析失败必须报错，
     # 绝不能静默新建第二个 Base。
     if config.CONFIG_PATH.exists():
-        return _verify_existing(config.load_config(), schema)
-    return _create_all(schema, load_categories(), base_name, folder_token)
+        cfg = _verify_existing(config.load_config(), schema)
+        stored_name = cfg.get("base_name")
+        return InitResult(
+            cfg,
+            False,
+            stored_name if isinstance(stored_name, str) else "",
+        )
+    return InitResult(
+        _create_all(schema, load_categories(), base_name, folder_token),
+        True,
+        base_name,
+    )

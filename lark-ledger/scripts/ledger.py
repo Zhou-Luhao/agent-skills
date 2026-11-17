@@ -421,11 +421,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_init(args: argparse.Namespace) -> int:
-    cfg = init_flow.run_init(args.folder_token, args.base_name)
-    print(
-        "初始化完成：%s，%d 张表，预置分类已写入。"
-        % (args.base_name, len(cfg.get("tables", {})))
-    )
+    result = init_flow.run_init(args.folder_token, args.base_name)
+    tables = len(result.get("tables", {}))
+    if result.created:
+        print(
+            "初始化完成：%s，%d 张表，预置分类已写入。"
+            % (result.base_name, tables)
+        )
+    elif result.base_name:
+        print(
+            "账本已存在，校验通过：%s，%d 张表；未做任何改动。"
+            % (result.base_name, tables)
+        )
+    else:
+        print("账本已存在，校验通过：%d 张表；未做任何改动。" % tables)
     print("配置文件：%s" % config.CONFIG_PATH)
     return EXIT_OK
 
@@ -840,6 +849,8 @@ def _holding_rows(records: List[dict], account_names: dict) -> List[List[str]]:
                         for item in value
                     )
                 )
+            elif name == "最新价日期":
+                row.append(lark.date_cell_text(value) or _cell_text(value))
             else:
                 row.append(_cell_text(value))
         rows.append(row)
@@ -1170,6 +1181,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return EXIT_LARK
+    except posting.PostingDataError as exc:
+        print("数据错误：%s" % exc, file=sys.stderr)
+        return EXIT_DATA
     except posting.PostingError as exc:
         print("参数错误：%s" % exc, file=sys.stderr)
         return EXIT_USAGE

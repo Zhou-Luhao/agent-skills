@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
+import lark
 import posting
 
 WritePlan = posting.WritePlan
@@ -389,7 +390,7 @@ def _iter_rows(rows: Any) -> List[Tuple[Any, Any]]:
 
 
 def expired_keys(
-    rows: List[dict], today: datetime.date
+    rows: Any, today: datetime.date
 ) -> List[str]:
     """状态=待回补 且账龄 >7 天的行 → 主字段键列表（按日期/键排序）。"""
     base = _as_date(today)
@@ -517,11 +518,11 @@ def plan_updates(
     quote_updates: Dict[str, Dict[str, Any]] = {}
 
     # 1) 过期待回补行：只改状态，不动空价格。
+    #    复用 expired_keys，保证「过期」在这两处只有一套判定。
+    expired = set(expired_keys(rows or {}, base))
     for key in sorted(infos, key=lambda item: (infos[item].day, item)):
         info = infos[key]
-        if info.status != STATUS_PENDING:
-            continue
-        if (base - info.day).days > EXPIRY_DAYS and info.record_id:
+        if info.primary in expired and info.record_id:
             quote_updates[key] = {STATUS_FIELD: [STATUS_NO_DATA]}
 
     # 2) 既有已落行提供"最新价"候选。
@@ -599,7 +600,7 @@ def plan_updates(
             continue
         latest_day, latest_price = latest
 
-        current_text = _text(fields.get(LATEST_DATE_FIELD))
+        current_text = lark.date_cell_text(fields.get(LATEST_DATE_FIELD))
         current_day = ""
         if current_text:
             try:

@@ -405,6 +405,25 @@ class PlanUpdatesTest(unittest.TestCase):
 
         self.assertIsNone(update_fields(plan, "持仓", self.HOLDING_ID))
 
+    def test_plan_updates_never_downgrades_latest_ms_date(self):
+        # 真实 Base 读回的「最新价日期」是毫秒时间戳，不能让守卫失效。
+        rows = {
+            "sh600519_2026-11-16": quote_row(
+                "r16", self.CODE, "2026-11-16", status="已落", price=1450.0
+            )
+        }
+        latest_ms = 1794844800000  # 2026-11-17 00:00 UTC+8
+
+        plan = quotes.plan_updates(
+            self.holdings(latest=1460.0, latest_date=latest_ms),
+            rows,
+            [],
+            {},
+            datetime.date(2026, 11, 17),
+        )
+
+        self.assertIsNone(update_fields(plan, "持仓", self.HOLDING_ID))
+
     def test_plan_updates_expired_pending_to_no_data(self):
         rows = {
             "sh600519_2026-11-01": quote_row("r_old", self.CODE, "2026-11-01"),

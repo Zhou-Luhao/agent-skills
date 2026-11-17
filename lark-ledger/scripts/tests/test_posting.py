@@ -103,6 +103,21 @@ class PlanAddTest(PostingTestBase):
             self.update_for(plan, "acc_credit"), {"当前余额": -2500.0}
         )
 
+    def test_missing_current_balance_is_data_error(self):
+        accounts = {
+            "acc_cash": {
+                "账户名称": "现金",
+                "类型": ["现金"],
+                "初始余额": 1000.0,
+                "状态": ["在用"],
+            }
+        }
+
+        with self.assertRaises(posting.PostingDataError) as caught:
+            posting.plan_add(self.entry(), accounts, {})
+
+        self.assertIn("当前余额", str(caught.exception))
+
     def test_rounding_two_decimals(self):
         accounts = {"acc_cash": account("现金", 0.1)}
         plan = posting.plan_add(

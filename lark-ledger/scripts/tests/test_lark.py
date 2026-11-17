@@ -136,6 +136,17 @@ class TimeTest(unittest.TestCase):
     def test_from_ms_utc8_date(self):
         self.assertEqual(lark.from_ms(1794844800000), "2026-11-17")
 
+    def test_date_cell_text_accepts_str_and_ms(self):
+        self.assertEqual(lark.date_cell_text("2026-11-17"), "2026-11-17")
+        self.assertEqual(
+            lark.date_cell_text("2026-11-17 00:00"), "2026-11-17"
+        )
+        self.assertEqual(
+            lark.date_cell_text(1794844800000), "2026-11-17"
+        )
+        self.assertEqual(lark.date_cell_text(None), "")
+        self.assertEqual(lark.date_cell_text(True), "")
+
 
 class AuthTest(unittest.TestCase):
     @mock.patch("lark.subprocess.run")
@@ -147,6 +158,25 @@ class AuthTest(unittest.TestCase):
         self.assertTrue(lark.auth_ok())
         # auth status 只支持 --json，不支持 --format json
         self.assertEqual(_cmd(run), ["lark-cli", "auth", "status", "--json"])
+
+    @mock.patch("lark.subprocess.run")
+    def test_idle_session_needs_refresh_is_logged_in(self, run):
+        # 真实机器上 access token 过期、下一次调用自动刷新时的信封。
+        run.return_value = _proc(
+            json.dumps(
+                {
+                    "identities": {
+                        "user": {
+                            "status": "needs_refresh",
+                            "tokenStatus": "needs_refresh",
+                            "available": True,
+                        }
+                    }
+                }
+            )
+        )
+
+        self.assertTrue(lark.auth_ok())
 
     @mock.patch("lark.subprocess.run")
     def test_user_not_ready(self, run):
@@ -251,6 +281,19 @@ class CreateBaseFolderTest(unittest.TestCase):
         self.assertEqual(lark.create_base_folder("个人账本", "fld1"), "app2")
 
     @mock.patch("lark.subprocess.run")
+    def test_flat_base_token(self, run):
+        # lark-base reference 把 +base-create 的返回值叫 base_token。
+        run.return_value = _proc(_envelope({"base_token": "bascn1"}))
+
+        self.assertEqual(lark.create_base_folder("个人账本", "fld1"), "bascn1")
+
+    @mock.patch("lark.subprocess.run")
+    def test_nested_base_token(self, run):
+        run.return_value = _proc(_envelope({"base": {"base_token": "bascn2"}}))
+
+        self.assertEqual(lark.create_base_folder("个人账本", "fld1"), "bascn2")
+
+    @mock.patch("lark.subprocess.run")
     def test_missing_app_token_raises(self, run):
         run.return_value = _proc(_envelope({"url": "https://example"}))
 
@@ -294,6 +337,30 @@ class CreateTableTest(unittest.TestCase):
         with self.assertRaises(lark.LarkError) as ctx:
             lark.create_table("app1", "账户", self.FIELDS)
         self.assertEqual(ctx.exception.payload, payload)
+
+
+class DeleteTableTest(unittest.TestCase):
+    @mock.patch("lark.subprocess.run")
+    def test_deletes_with_yes(self, run):
+        run.return_value = _proc(_envelope({"deleted": True}))
+
+        lark.delete_table("app1", "tbl1")
+
+        self.assertEqual(
+            _cmd(run),
+            [
+                "lark-cli",
+                "base",
+                "+table-delete",
+                "--base-token",
+                "app1",
+                "--table-id",
+                "tbl1",
+                "--yes",
+                "--format",
+                "json",
+            ],
+        )
 
 
 class ListTablesTest(unittest.TestCase):

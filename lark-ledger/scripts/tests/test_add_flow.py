@@ -675,6 +675,30 @@ class LedgerCliAddTest(AddFlowTestBase):
         self.assertEqual(code, 5)
         self.assertIn("数据错误", err.getvalue())
 
+    def test_cli_missing_current_balance_exit_5(self):
+        # Base 里缺单元格是数据问题，不是用法错误。
+        del self.accounts[0]["fields"]["当前余额"]
+
+        with captured_output() as (out, err):
+            code = ledger.main(
+                [
+                    "add",
+                    "--kind",
+                    "expense",
+                    "--amount",
+                    "35",
+                    "--account",
+                    "现金",
+                    "--category",
+                    "支出·餐饮·午餐",
+                ]
+            )
+
+        self.assertEqual(code, 5)
+        self.assertIn("数据错误", err.getvalue())
+        self.assertIn("当前余额", err.getvalue())
+        self.assertFalse(self.create_records.called)
+
 
 if __name__ == "__main__":
     unittest.main()

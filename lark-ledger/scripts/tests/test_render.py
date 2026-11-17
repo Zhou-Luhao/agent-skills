@@ -133,7 +133,7 @@ class HtmlRenderTest(unittest.TestCase):
 
         for number in ("31,500.00", "2,335.30", "29,164.70", "131,164.70"):
             self.assertIn(number, html)
-        for text in ("收入", "支出", "结余", "当前净资产",
+        for text in ("收入", "支出", "结余", "期末净资产",
                      "支出分类", "收入分类", "持仓", "负债"):
             self.assertIn(text, html)
         self.assertIn("贵州茅台", html)
@@ -259,7 +259,7 @@ class MarkdownRenderTest(unittest.TestCase):
 
         for number in ("31,500.00", "2,335.30", "29,164.70", "131,164.70"):
             self.assertIn(number, md)
-        for text in ("# 财务周报", "收入", "支出", "结余", "当前净资产"):
+        for text in ("# 财务周报", "收入", "支出", "结余", "期末净资产"):
             self.assertIn(text, md)
 
     def test_markdown_tables(self):

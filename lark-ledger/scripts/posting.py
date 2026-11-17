@@ -55,6 +55,13 @@ class PostingError(ValueError):
     """记账参数不合法：类型、金额、账户、分类等。"""
 
 
+class PostingDataError(PostingError):
+    """Base 里的数据不可用（如缺「当前余额」「年利率」单元格）。
+
+    与参数形状错误区分：CLI 应映射为退出码 5（数据错误），而不是 2（用法错误）。
+    """
+
+
 def _number(value: Any, label: str) -> float:
     """转成有限浮点数；布尔值、非数字、NaN/Inf 都给出可行动的报错。"""
     if isinstance(value, bool):
@@ -638,13 +645,14 @@ def balance_deltas(entry: dict, accounts: Dict[str, dict]) -> Dict[str, float]:
 
 def _current_balance(account_id: str, accounts: Dict[str, dict]) -> float:
     fields = accounts.get(account_id)
-    if not isinstance(fields, dict) or "当前余额" not in fields:
-        raise PostingError(
+    raw = fields.get("当前余额") if isinstance(fields, dict) else None
+    if not _present(raw):
+        raise PostingDataError(
             "账户「%s」缺少「当前余额」字段，无法更新余额；请检查账户表"
             % _account_label(account_id, accounts)
         )
     return _number(
-        fields["当前余额"],
+        raw,
         "账户「%s」的当前余额" % _account_label(account_id, accounts),
     )
 
@@ -686,7 +694,7 @@ def _loan_rate(loan_id: str, accounts: Dict[str, dict]) -> float:
     fields = accounts.get(loan_id)
     raw = fields.get("年利率") if isinstance(fields, dict) else None
     if not _present(raw):
-        raise PostingError(
+        raise PostingDataError(
             "负债账户「%s」缺少「年利率」，无法拆分本息；"
             "请先用 `ledger.py account edit <账户> --rate 4.2` 补年利率"
             % _account_label(loan_id, accounts)

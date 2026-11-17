@@ -358,6 +358,18 @@ class HoldingTest(MasterDataTestBase):
                 self.cfg, "宁德时代", "sz300750", "股票", "不存在的账户", 200, 180
             )
 
+    def test_holding_add_rejects_non_wealth_account(self):
+        with self.assertRaises(master_data.MasterDataError) as caught:
+            master_data.holding_add(
+                self.cfg, "宁德时代", "sz300750", "股票", "招行工资卡", 200, 180
+            )
+
+        message = str(caught.exception)
+        self.assertIn("理财", message)
+        self.assertIn("银行卡", message)
+        self.assertIn("account list", message)
+        self.assertFalse(self.create_records.called)
+
     def test_holding_add_rejects_invalid_kind(self):
         with self.assertRaises(master_data.MasterDataError):
             master_data.holding_add(
@@ -377,10 +389,24 @@ class HoldingTest(MasterDataTestBase):
         self.assertEqual(fields["品种"], ["股票"])
 
     def test_holding_edit_account_writes_link(self):
-        master_data.holding_edit(self.cfg, "sh600519", account="现金")
+        self.accounts.append(account("recA5", "天天基金", "理财", 0))
+
+        master_data.holding_edit(self.cfg, "sh600519", account="天天基金")
 
         self.assertEqual(
-            self._record("tbl_holding", "recH1")["理财账户"], [{"id": "recA4"}]
+            self._record("tbl_holding", "recH1")["理财账户"], [{"id": "recA5"}]
+        )
+
+    def test_holding_edit_rejects_non_wealth_account(self):
+        with self.assertRaises(master_data.MasterDataError) as caught:
+            master_data.holding_edit(self.cfg, "sh600519", account="现金")
+
+        message = str(caught.exception)
+        self.assertIn("理财", message)
+        self.assertIn("现金", message)
+        self.assertEqual(
+            self._record("tbl_holding", "recH1")["理财账户"],
+            [{"id": "recA3"}],
         )
 
     def test_holding_edit_rejects_formula_fields(self):
@@ -573,6 +599,17 @@ class LedgerCliTest(MasterDataTestBase):
         self.assertEqual(code, 0)
         self.assertIn("贵州茅台", out.getvalue())
         self.assertIn("sh600519", out.getvalue())
+
+    def test_holding_list_cli_renders_ms_date(self):
+        # lark datetime 单元格读回来是 UTC+8 毫秒时间戳，不能原样打印。
+        self.holdings[0]["fields"]["最新价日期"] = 1794844800000
+
+        with captured_output() as (out, err):
+            code = ledger.main(["holding", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("2026-11-17", out.getvalue())
+        self.assertNotIn("1794844800000", out.getvalue())
 
     def test_unknown_account_exit_5(self):
         with captured_output() as (out, err):

@@ -6,14 +6,15 @@
 - 条件查询走 `base +record-list --filter-json`（v1.0.100 的 `+record-search`
   只支持关键词检索，不能只传 filter），并把 CLI 的“行矩阵”输出还原成
   `[{"record_id": ..., "fields": {...}}]`。
-- 日期写入用 `to_ms` 生成 UTC+8 当日 0 点毫秒；读到的毫秒值用
-  `from_ms` 转回 `"YYYY-MM-DD"`。
+- 日期写入用 `"YYYY-MM-DD 00:00"` 字符串（与 add_flow 一致）；读到的日期
+  单元格可能是字符串或毫秒值，统一用 `date_cell_text` 归一成 `"YYYY-MM-DD"`
+  （毫秒走 `from_ms`）。
 """
 
 import datetime
 import json
 import subprocess
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 CLI = "lark-cli"
 TIMEOUT_SECONDS = 60
@@ -141,7 +142,9 @@ def auth_ok() -> bool:
     user = identities.get("user")
     if not isinstance(user, dict):
         return False
-    return user.get("status") == "ready"
+    # 空闲会话的 access token 会过期，`auth status` 报 needs_refresh 但
+    # available=true，下一次调用会自动刷新；这仍算已登录。
+    return user.get("status") in ("ready", "needs_refresh")
 
 
 def to_ms(date_str: str) -> int:
@@ -154,6 +157,28 @@ def from_ms(ms: int) -> str:
     """UTC+8 毫秒时间戳 → `"YYYY-MM-DD"`。"""
     moment = _EPOCH_UTC + datetime.timedelta(milliseconds=ms)
     return moment.astimezone(_TZ).strftime("%Y-%m-%d")
+
+
+def date_cell_text(value: Any) -> str:
+    """日期单元格 → `"YYYY-MM-DD"`；接受字符串或毫秒时间戳。
+
+    字符串取日期部分（兼容 `"YYYY-MM-DD 00:00"`）；毫秒值走 `from_ms`。
+    非日期输入返回空串，由调用方决定回退展示。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        candidate = text[:10]
+        try:
+            datetime.date.fromisoformat(candidate)
+        except ValueError:
+            return text
+        return candidate
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return from_ms(int(value))
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return ""
 
 
 def _required_text(data: dict, key: str, context: str) -> str:
@@ -195,14 +220,18 @@ def create_base_folder(title: str, folder_token: str) -> str:
     data = run_cli(
         ["base", "+base-create", "--name", title, "--folder-token", folder_token]
     )
-    app_token = data.get("app_token")
+    app_token = data.get("app_token") or data.get("base_token")
     if not app_token:
-        app_token = _nested_dict(data, "app").get("app_token")
+        app = _nested_dict(data, "app")
+        app_token = app.get("app_token") or app.get("base_token")
     if not app_token:
-        app_token = _nested_dict(data, "base").get("app_token")
+        base = _nested_dict(data, "base")
+        app_token = base.get("app_token") or base.get("base_token")
     if not isinstance(app_token, str) or not app_token:
         raise LarkError(
-            "base +base-create 返回缺少 app_token：%s" % _json_arg(data), data
+            "base +base-create 返回缺少 app_token/base_token：%s"
+            % _json_arg(data),
+            data,
         )
     return app_token
 
@@ -233,6 +262,21 @@ def create_table(app_token: str, name: str, fields: List[dict]) -> str:
             "base +table-create 返回缺少 table_id：%s" % _json_arg(data), data
         )
     return table_id
+
+
+def delete_table(app_token: str, table_id: str) -> None:
+    """删除数据表；high-risk-write，仅在“清掉新建 Base 的默认表”场景调用。"""
+    run_cli(
+        [
+            "base",
+            "+table-delete",
+            "--base-token",
+            app_token,
+            "--table-id",
+            table_id,
+            "--yes",
+        ]
+    )
 
 
 def _items(data: dict, key: str) -> List[dict]:

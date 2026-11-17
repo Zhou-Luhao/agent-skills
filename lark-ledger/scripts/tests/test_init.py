@@ -422,6 +422,7 @@ class InitTestBase(unittest.TestCase):
         self.create_table = patch(
             "init_flow.lark.create_table", side_effect=self._create_table
         )
+        self.delete_table = patch("init_flow.lark.delete_table")
         self.list_tables = patch("init_flow.lark.list_tables", return_value=[])
         self.list_fields = patch(
             "init_flow.lark.list_fields", side_effect=self._list_fields
@@ -517,6 +518,31 @@ class InitFlowTest(InitTestBase):
             self.assertEqual(call.args[0], "app1")
             self.assertEqual(call.args[2], table["fields"])
 
+    def test_removes_platform_default_table_before_schema(self):
+        # base/wiki 创建 bitable 时会附带一张平台默认表；fresh init 必须删掉。
+        self.list_tables.return_value = [
+            {"table_id": "tbl_default", "name": "数据表"}
+        ]
+
+        init_flow.run_init(None)
+
+        self.delete_table.assert_called_once_with("app1", "tbl_default")
+        self.assertEqual(
+            len(self.create_table.call_args_list),
+            len(init_flow.load_schema()["tables"]),
+        )
+
+    def test_folder_init_removes_platform_default_table_too(self):
+        self.create_base_folder.return_value = "app2"
+        self.list_tables.return_value = [
+            {"table_id": "tbl_default", "name": "数据表"}
+        ]
+
+        init_flow.run_init("fld1")
+
+        self.delete_table.assert_called_once_with("app2", "tbl_default")
+        self.assertEqual(len(self.create_table.call_args_list), 6)
+
     def test_categories_written_with_full_name(self):
         init_flow.run_init(None)
 
@@ -535,12 +561,16 @@ class InitFlowTest(InitTestBase):
         self.assertIn("支出·餐饮·午餐", {record["分类"] for record in records})
         self.assertIn("收入·理财收益·基金收益", {record["分类"] for record in records})
         for record in records:
-            self.assertIn(record["类型"], ("收入", "支出"))
+            self.assertEqual(record["类型"], [record["分类"].split("·")[0]])
             self.assertEqual(
                 record["分类"],
                 "·".join(
                     part
-                    for part in (record["类型"], record["一级"], record["二级"])
+                    for part in (
+                        record["类型"][0],
+                        record["一级"],
+                        record["二级"],
+                    )
                     if part
                 ),
             )
@@ -644,6 +674,21 @@ class InitFlowTest(InitTestBase):
         self.assertEqual(ctx.exception.payload, {"code": 1})
         self.save_config.assert_not_called()
 
+    def test_base_creation_failure_is_wrapped_with_partial_note(self):
+        # Base 创建也在 try 内：拿不到 token 时也要交代可能已留下空 Base。
+        self.create_base_library.side_effect = lark.LarkError(
+            "建 Base 失败", {"code": 2}
+        )
+
+        with self.assertRaises(lark.LarkError) as ctx:
+            init_flow.run_init(None)
+
+        message = str(ctx.exception)
+        self.assertIn("建 Base 失败", message)
+        self.assertIn("未拿到 app_token", message)
+        self.assertEqual(ctx.exception.payload, {"code": 2})
+        self.save_config.assert_not_called()
+
     def test_create_table_failure_names_only_created_tables(self):
         def fail_on_holding(app_token, name, fields):
             self.created_tables.append({"name": name, "fields": fields})
@@ -665,6 +710,8 @@ class InitFlowTest(InitTestBase):
     def test_config_saved_with_ids(self):
         cfg = init_flow.run_init(None)
 
+        self.assertTrue(cfg.created)
+        self.assertEqual(cfg.base_name, "个人账本")
         self.save_config.assert_called_once_with(cfg)
         self.assertEqual(cfg["version"], 1)
         self.assertIsNone(cfg["last_quotes_date"])
@@ -687,6 +734,7 @@ class InitFlowTest(InitTestBase):
 
         result = init_flow.run_init(None)
 
+        self.assertFalse(result.created)
         self.assertEqual(result, cfg)
         for mocked in (
             self.create_base_library,
@@ -778,6 +826,21 @@ class LedgerCliTest(InitTestBase):
         self.assertEqual(code, 0)
         self.assertEqual(err.getvalue(), "")
         self.assertIn("初始化完成", out.getvalue())
+
+    def test_validated_init_does_not_claim_creation(self):
+        cfg = self._existing_config()
+        cfg["base_name"] = "个人账本"
+        self._use_existing_config(cfg)
+
+        with captured_output() as (out, err):
+            code = ledger.main(["init"])
+
+        self.assertEqual(code, 0)
+        output = out.getvalue()
+        self.assertIn("校验通过", output)
+        self.assertIn("个人账本", output)
+        self.assertNotIn("初始化完成", output)
+        self.assertNotIn("预置分类已写入", output)
 
     def test_not_logged_in_exit_3(self):
         self.auth_ok.return_value = False

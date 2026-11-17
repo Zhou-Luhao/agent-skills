@@ -200,6 +200,14 @@ class LoanRepayPlanTest(unittest.TestCase):
         # 本金 + 利息 = 还款总额。
         self.assertEqual(sum(row["金额"] for row in rows), 8500.0)
 
+    def test_missing_rate_is_data_error(self):
+        del self.accounts["acc_loan"]["年利率"]
+
+        with self.assertRaises(posting.PostingDataError) as caught:
+            posting.plan_add(self.entry(), self.accounts, {})
+
+        self.assertIn("年利率", str(caught.exception))
+
     def test_repay_balances(self):
         plan = posting.plan_add(self.entry(), self.accounts, {})
 

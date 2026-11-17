@@ -574,7 +574,7 @@ def render_html(data: dict) -> str:
         _kpi("收入", esc(_money(income)), "统计区间内已入账收入", "income"),
         _kpi("支出", esc(_money(expense)), "已排除转账与贷款本金", "expense"),
         _kpi("结余", esc(_money(net)), "收入 − 支出", "net"),
-        _kpi("当前净资产", esc(_money(current)), esc(delta_note)),
+        _kpi("期末净资产", esc(_money(current)), esc(delta_note)),
     ])
 
     body = [
@@ -669,7 +669,7 @@ def render_markdown(data: dict) -> str:
             ["收入", _money(income)],
             ["支出", _money(expense)],
             ["结余", _money(net)],
-            ["当前净资产", _money(current)],
+            ["期末净资产", _money(current)],
         ],
     ))
     lines.append("")

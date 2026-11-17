@@ -222,6 +222,22 @@ def _rate_fraction(value: Any) -> float:
     return rate
 
 
+def _require_wealth_account(cfg: dict, ref: Any) -> dict:
+    """持仓只能挂在「类型=理财」的账户上；否则快照不会计入其市值。"""
+    account = resolve_account(cfg, ref)
+    fields = account.get("fields") if isinstance(account, dict) else None
+    type_text = _cell_text(fields.get("类型") if isinstance(fields, dict) else None)
+    if type_text != "理财":
+        name = _cell_text(fields.get("账户名称") if isinstance(fields, dict) else None)
+        raise MasterDataError(
+            "持仓的理财账户必须是「类型=理财」的账户：「%s」的类型是「%s」。"
+            "请先用 `ledger.py account list` 查看，或 `ledger.py account add "
+            "--name <名称> --type 理财 --opening <余额>` 新建理财账户后再添加持仓。"
+            % (name or ref, type_text or "未填写")
+        )
+    return account
+
+
 def _created_id(record_ids: List[str], label: str) -> str:
     if len(record_ids) != 1 or not isinstance(record_ids[0], str) or not record_ids[0]:
         raise MasterDataError(
@@ -346,7 +362,7 @@ def holding_add(
 
     期初份额 / 期初成本与当前值一致，状态默认「持有」；理财账户写成关联。
     """
-    account = resolve_account(cfg, account_ref)
+    account = _require_wealth_account(cfg, account_ref)
     shares_value = _number(shares, "当前份额", non_negative=True)
     cost_value = _number(cost, "成本价", non_negative=True)
     fields: Dict[str, Any] = {
@@ -388,8 +404,12 @@ def _holding_value(cfg: dict, name: str, value: Any) -> Any:
         return [_choice(value, HOLDING_KINDS, "品种")]
     if name == "理财账户":
         if isinstance(value, list):
+            for item in value:
+                account_id = item.get("id") if isinstance(item, dict) else item
+                if isinstance(account_id, str) and account_id:
+                    _require_wealth_account(cfg, account_id)
             return value
-        account = resolve_account(cfg, value)
+        account = _require_wealth_account(cfg, value)
         return [{"id": account["record_id"]}]
     if name in ("当前份额", "期初份额"):
         return _number(value, name, non_negative=True)
