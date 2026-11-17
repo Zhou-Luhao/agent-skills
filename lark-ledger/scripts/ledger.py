@@ -1,8 +1,8 @@
 """lark-ledger 命令行入口。
 
 退出码约定：0 成功 / 2 参数错误 / 3 未配置或未登录 / 4 lark-cli 调用失败 / 5 数据错误。
-已实现 init（建账本）、add（记一笔）、edit / delete / rebuild（修正与重算）
-与 account / holding 主数据子命令。
+已实现 init（建账本）、add（记一笔）、edit / delete / rebuild（修正与重算）、
+quotes（行情回补）与 account / holding 主数据子命令。
 """
 
 import argparse
@@ -16,6 +16,7 @@ import init_flow
 import lark
 import master_data
 import posting
+import quotes_flow
 import rebuild_flow
 
 EXIT_OK = 0
@@ -287,6 +288,17 @@ def _add_rebuild_parser(subparsers) -> None:
     )
 
 
+def _add_quotes_parser(subparsers) -> None:
+    quotes = subparsers.add_parser(
+        "quotes", help="拉取近 3 天行情并回补待回补的收盘价/净值"
+    )
+    quotes.add_argument(
+        "--force",
+        action="store_true",
+        help="忽略 15:05 时间窗与今日已运行标记，强制拉取",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ledger.py",
@@ -312,6 +324,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_edit_parser(subparsers)
     _add_delete_parser(subparsers)
     _add_rebuild_parser(subparsers)
+    _add_quotes_parser(subparsers)
     _add_account_parsers(subparsers)
     _add_holding_parsers(subparsers)
     return parser
@@ -785,6 +798,30 @@ def _holding_edit_fields(args: argparse.Namespace) -> dict:
     return fields
 
 
+def _run_quotes(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    try:
+        result = quotes_flow.run_quotes(cfg, force=args.force)
+    except config.ConfigError as exc:
+        # 配置不完整时一条都没法跑；源级告警不算失败（正常返回 0）。
+        print("配置错误：%s" % exc, file=sys.stderr)
+        return EXIT_LARK
+    if result.get("skipped"):
+        print(
+            "行情未运行：未到 15:05 或今天已经更新过；"
+            "可用 --force 强制更新。"
+        )
+        return EXIT_OK
+    errors = result.get("errors") or []
+    for error in errors:
+        print("警告：%s" % error, file=sys.stderr)
+    print(
+        "行情更新完成：更新 %d 项，待回补 %d 条，告警 %d 个。"
+        % (result["updated"], result["pending"], len(errors))
+    )
+    return EXIT_OK
+
+
 def _run_account(args: argparse.Namespace) -> int:
     cfg = config.load_config()
     if args.action == "add":
@@ -882,6 +919,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_delete(args)
         if args.command == "rebuild":
             return _run_rebuild(args)
+        if args.command == "quotes":
+            return _run_quotes(args)
         if args.command == "account":
             return _run_account(args)
         if args.command == "holding":

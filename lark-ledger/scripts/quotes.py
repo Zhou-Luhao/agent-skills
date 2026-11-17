@@ -1,8 +1,10 @@
-"""行情解析、回补窗口与落表计划（纯逻辑层）。
+"""行情解析、回补窗口与落表计划；另含两个 HTTP 抓取函数。
 
-本模块只做字符串/数值/日期计算：不 import lark / config / urllib，
-不读文件、不联网、不读时钟。`today` / `now` 一律由调用方传入，
-日期在计划里始终保持 "YYYY-MM-DD" 字符串（毫秒时间戳由 I/O 层转换）。
+解析/窗口/计划部分保持纯逻辑：不读文件、不读时钟，`today` / `now`
+一律由调用方传入，日期在计划里始终保持 "YYYY-MM-DD" 字符串。
+`fetch_stock` / `fetch_fund` 是唯一有网络副作用的入口：stdlib
+`urllib.request`，任何传输/解析失败统一抛 `QuoteSourceError`，调用方
+据此把"源头故障"与"净值尚未公布"区分开——故障绝不能伪装成空行情。
 
 落表契约（与 posting.WritePlan 同形）：
 
@@ -16,8 +18,11 @@
 """
 
 import datetime
+import http.client
 import json
 import math
+import urllib.error
+import urllib.request
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import posting
@@ -43,13 +48,33 @@ RUN_AFTER_HOUR = 15
 RUN_AFTER_MINUTE = 5
 EXPIRY_DAYS = 7
 
+HTTP_TIMEOUT_SECONDS = 15
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+STOCK_KLINE_URL = (
+    "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+    "CN_MarketData.getKLineData?symbol=%s&scale=240&ma=5&datalen=5"
+)
+FUND_NAV_URL = (
+    "https://api.fund.eastmoney.com/f10/lsjz"
+    "?fundCode=%s&pageIndex=1&pageSize=10&startDate=%s&endDate=%s"
+)
+FUND_REFERER = "https://fundf10.eastmoney.com/jjjz_%s.html"
+
 _TZ_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 _EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 __all__ = [
     "WritePlan",
     "QUOTE_TABLE",
+    "QuoteSourceError",
+    "BROWSER_UA",
+    "HTTP_TIMEOUT_SECONDS",
     "code_kind",
+    "fetch_stock",
+    "fetch_fund",
     "parse_stock_kline",
     "parse_fund_nav",
     "quote_window",
@@ -57,6 +82,10 @@ __all__ = [
     "should_run",
     "plan_updates",
 ]
+
+
+class QuoteSourceError(RuntimeError):
+    """行情源不可用：网络/HTTP 错误、超时、接口报错或响应无法解析。"""
 
 
 def _as_date(value: Any) -> datetime.date:
@@ -201,6 +230,70 @@ def parse_fund_nav(envelope: Any) -> Dict[str, float]:
             continue
         result[day.isoformat()] = nav
     return result
+
+
+def _http_get(url: str, headers: Dict[str, str]) -> str:
+    """GET 一个行情接口并解码成文本；任何传输错误都转成 QuoteSourceError。"""
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(
+            request, timeout=HTTP_TIMEOUT_SECONDS
+        ) as response:
+            body = response.read()
+    except (
+        urllib.error.URLError,
+        http.client.HTTPException,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise QuoteSourceError("行情接口请求失败（%s）：%s" % (url, exc)) from exc
+    if isinstance(body, bytes):
+        return body.decode("utf-8", "replace")
+    return str(body)
+
+
+def fetch_stock(code: str) -> Dict[str, float]:
+    """新浪日 K → {日期: 收盘价}；非股票代码或源头异常抛错。"""
+    if code_kind(code) != "stock":
+        raise ValueError("不是股票代码：%r" % (code,))
+    url = STOCK_KLINE_URL % (code,)
+    body = _http_get(url, {"User-Agent": BROWSER_UA})
+    try:
+        return parse_stock_kline(body)
+    except ValueError as exc:
+        raise QuoteSourceError(
+            "股票日K响应无法解析（%s）：%s" % (code, exc)
+        ) from exc
+
+
+def fetch_fund(code: str, start: str, end: str) -> Dict[str, float]:
+    """东财历史净值 → {日期: 单位净值}；必须带 Referer，否则接口报错。
+
+    `ErrCode` 非 0、HTTP/超时错误或响应无法解析都抛 QuoteSourceError：
+    接口故障不能被当成"净值尚未公布"，否则会错误地落空值行。
+    """
+    if code_kind(code) != "fund":
+        raise ValueError("不是基金代码：%r" % (code,))
+    url = FUND_NAV_URL % (code, start, end)
+    body = _http_get(
+        url,
+        {
+            "User-Agent": BROWSER_UA,
+            "Referer": FUND_REFERER % (code,),
+        },
+    )
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise QuoteSourceError(
+            "基金净值响应不是合法 JSON（%s）：%s" % (code, exc)
+        ) from exc
+    try:
+        return parse_fund_nav(payload)
+    except ValueError as exc:
+        raise QuoteSourceError(
+            "基金净值响应无法解析（%s）：%s" % (code, exc)
+        ) from exc
 
 
 def quote_window(
