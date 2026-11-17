@@ -115,6 +115,15 @@ class ParseStockTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             quotes.parse_stock_kline('{"day": "2026-11-17"}')
 
+    def test_parse_stock_skips_non_finite(self):
+        # NaN/Inf 不能被当成 0.0 落表：整行跳过。
+        parsed = quotes.parse_stock_kline(
+            '[{"day": "2026-11-17", "close": "nan"},'
+            ' {"day": "2026-11-16", "close": "inf"},'
+            ' {"day": "2026-11-15", "close": "1457.7"}]'
+        )
+        self.assertEqual(parsed, {"2026-11-15": 1457.7})
+
 
 class ParseFundTest(unittest.TestCase):
     def test_parse_fund_fixture(self):
@@ -134,6 +143,43 @@ class ParseFundTest(unittest.TestCase):
         )
         self.assertEqual(quotes.parse_fund_nav({"Data": {}}), {})
         self.assertEqual(quotes.parse_fund_nav({}), {})
+
+    def test_parse_fund_raises_on_error_envelope(self):
+        # ErrCode != 0 是接口报错，不能伪装成"净值未公布"。
+        envelope = {
+            "ErrCode": 1,
+            "ErrMsg": "参数错误：fundCode 非法",
+            "Data": {"LSJZList": [{"FSRQ": "2026-11-16", "DWJZ": "4.0854"}]},
+        }
+        with self.assertRaises(ValueError) as raised:
+            quotes.parse_fund_nav(envelope)
+
+        message = str(raised.exception)
+        self.assertIn("1", message)
+        self.assertIn("参数错误", message)
+
+    def test_parse_fund_zero_error_code_is_ok(self):
+        envelope = {
+            "ErrCode": 0,
+            "Data": {"LSJZList": [{"FSRQ": "2026-11-16", "DWJZ": "4.0854"}]},
+        }
+        self.assertEqual(
+            quotes.parse_fund_nav(envelope), {"2026-11-16": 4.0854}
+        )
+
+    def test_parse_fund_skips_non_finite(self):
+        envelope = {
+            "Data": {
+                "LSJZList": [
+                    {"FSRQ": "2026-11-16", "DWJZ": "nan"},
+                    {"FSRQ": "2026-11-15", "DWJZ": "inf"},
+                    {"FSRQ": "2026-11-13", "DWJZ": "4.0771"},
+                ]
+            }
+        }
+        self.assertEqual(
+            quotes.parse_fund_nav(envelope), {"2026-11-13": 4.0771}
+        )
 
     def test_parse_fund_skips_malformed_rows(self):
         envelope = {
@@ -416,27 +462,113 @@ class PlanUpdatesTest(unittest.TestCase):
         self.assertIsNone(created_for(plan, "110011", "2026-11-17"))
         self.assertIsNone(created_for(plan, self.CODE, "2026-11-11"))
 
-    def test_plan_updates_deterministic(self):
+    def test_plan_updates_keeps_pending_when_no_value(self):
+        # 重试循环的安全不变量：窗口内的既有待回补行没抓到值时，
+        # 绝不能被空值 + 已落覆盖（否则该日期再也不会重试）。
         rows = {
-            "sh600519_2026-11-06": quote_row("r_old", self.CODE, "2026-11-06")
+            "sh600519_2026-11-15": quote_row(
+                "rec_pending_keep", self.CODE, "2026-11-15"
+            )
         }
-        holdings = {
+
+        plan = quotes.plan_updates(
+            self.holdings(),
+            rows,
+            [datetime.date(2026, 11, 15), datetime.date(2026, 11, 16)],
+            {},
+            datetime.date(2026, 11, 17),
+        )
+
+        self.assertIsNone(
+            update_fields(plan, "行情快照", "rec_pending_keep")
+        )
+        self.assertIsNone(created_for(plan, self.CODE, "2026-11-15"))
+        self.assertIsNotNone(created_for(plan, self.CODE, "2026-11-16"))
+        self.assertEqual(plan["update"], [])
+
+    def test_plan_updates_refreshes_filled_price_without_status(self):
+        # 已落行刷新价格：只写价格，不重复写状态。
+        rows = {
+            "sh600519_2026-11-16": quote_row(
+                "rec_filled", self.CODE, "2026-11-16",
+                status="已落", price=1440.0,
+            )
+        }
+
+        plan = quotes.plan_updates(
+            self.holdings(latest=1440.0, latest_date="2026-11-16"),
+            rows,
+            [datetime.date(2026, 11, 16)],
+            {self.CODE: {"2026-11-16": 1457.7}},
+            datetime.date(2026, 11, 17),
+        )
+
+        fields = update_fields(plan, "行情快照", "rec_filled")
+        self.assertEqual(fields, {"收盘价/净值": 1457.7})
+        self.assertNotIn("状态", fields)
+        self.assertIsNone(created_for(plan, self.CODE, "2026-11-16"))
+        self.assertEqual(
+            update_fields(plan, "持仓", self.HOLDING_ID),
+            {"最新价": 1457.7},
+        )
+
+    def test_plan_updates_deterministic(self):
+        # 行按日期倒序、窗口倒序，两个 holdings 字典插入顺序相反。
+        rows = {
+            "sh600519_2026-11-06": quote_row(
+                "r_old_b", self.CODE, "2026-11-06"
+            ),
+            "sh600519_2026-11-02": quote_row(
+                "r_old_a", self.CODE, "2026-11-02"
+            ),
+        }
+        holdings_a = {
             "rec_b": holding("rec_b", "110011"),
             "rec_a": holding("rec_a", self.CODE),
         }
-        window = [datetime.date(2026, 11, 16), datetime.date(2026, 11, 17)]
-        fetched = {"110011": {"2026-11-16": 4.0854}}
+        holdings_b = {
+            "rec_a": holding("rec_a", self.CODE),
+            "rec_b": holding("rec_b", "110011"),
+        }
+        window = [datetime.date(2026, 11, 17), datetime.date(2026, 11, 16)]
+        fetched = {
+            "110011": {"2026-11-16": 4.0854},
+            self.CODE: {"2026-11-17": 1457.7},
+        }
 
         first = quotes.plan_updates(
-            holdings, rows, window, fetched, datetime.date(2026, 11, 17)
+            holdings_a, rows, window, fetched, datetime.date(2026, 11, 17)
         )
         second = quotes.plan_updates(
-            holdings, rows, window, fetched, datetime.date(2026, 11, 17)
+            holdings_b, rows, window, fetched, datetime.date(2026, 11, 17)
         )
 
         self.assertEqual(first, second)
-        created_keys = [fields["代码-日期"] for _, fields in first["create"]]
-        self.assertEqual(created_keys, sorted(created_keys))
+        self.assertEqual(
+            [fields["代码-日期"] for _, fields in first["create"]],
+            [
+                "110011_2026-11-16",
+                "110011_2026-11-17",
+                "sh600519_2026-11-16",
+                "sh600519_2026-11-17",
+            ],
+        )
+        self.assertEqual(
+            [
+                record_id
+                for table, record_id, _ in first["update"]
+                if table == "行情快照"
+            ],
+            ["r_old_a", "r_old_b"],
+        )
+        self.assertEqual(
+            [
+                record_id
+                for table, record_id, _ in first["update"]
+                if table == "持仓"
+            ],
+            ["rec_a", "rec_b"],
+        )
 
 
 if __name__ == "__main__":

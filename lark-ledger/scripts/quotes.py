@@ -9,7 +9,8 @@
     {"create": [(表名, 字段dict), ...],
      "update": [(表名, record_id, 字段dict), ...]}
 
-「行情快照」以 `代码-日期` 为主字段/业务唯一键；`状态` 是单选，
+「行情快照」以 `代码-日期` 为主字段/业务唯一键，格式固定为
+`"<代码>_<YYYY-MM-DD>"`（如 `"sh600519_2026-11-17"`）；`状态` 是单选，
 沿用本仓库对单选字段的列表写法（如 `["已落"]`）。待回补行的
 `收盘价/净值` 显式为 None，表示"有日期没价格"。
 """
@@ -168,11 +169,18 @@ def parse_stock_kline(payload: Any) -> Dict[str, float]:
 def parse_fund_nav(envelope: Any) -> Dict[str, float]:
     """东财历史净值 envelope → {FSRQ: float(DWJZ)}。
 
-    `Data`/`LSJZList` 缺失或为空都返回 {}（当日净值未公布是常态）；
+    `ErrCode` 存在且非 0 时抛 ValueError（带 ErrCode/ErrMsg），不能把接口
+    报错误当成"净值未公布"；`Data`/`LSJZList` 缺失或为空才返回 {}。
     畸形行跳过而不是让整批失败。
     """
     if not isinstance(envelope, dict):
         raise ValueError("基金净值响应应为对象：%r" % (type(envelope).__name__,))
+    err_code = envelope.get("ErrCode")
+    if err_code is not None and err_code not in (0, "0"):
+        raise ValueError(
+            "基金净值接口返回错误：ErrCode=%r ErrMsg=%r"
+            % (err_code, envelope.get("ErrMsg"))
+        )
     data = envelope.get("Data")
     if not isinstance(data, dict):
         return {}
@@ -377,6 +385,10 @@ def plan_updates(
     today: datetime.date,
 ) -> WritePlan:
     """把窗口、已落库行与本次抓到的价格合成落表计划。
+
+    业务唯一键固定为 `"<代码>_<YYYY-MM-DD>"`，例如
+    `"sh600519_2026-11-17"`；Task 11 的 search-before-upsert 必须按这个
+    精确文本检索，才能命中既有行。
 
     - 命中新价的既有「待回补/已落」行 → update（待回补同时置已落）；
     - 窗口内没抓到的持仓代码日期 → create 空值「待回补」行；
