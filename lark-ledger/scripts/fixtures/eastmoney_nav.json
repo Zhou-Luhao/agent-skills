@@ -1,0 +1,28 @@
+{
+  "Data": {
+    "LSJZList": [
+      {
+        "FSRQ": "2026-11-13",
+        "DWJZ": "4.0771",
+        "LJJZ": "5.8671",
+        "JZZZL": "0.52",
+        "SGZT": "开放申购",
+        "SHZT": "开放赎回"
+      },
+      {
+        "FSRQ": "2026-11-16",
+        "DWJZ": "4.0854",
+        "LJJZ": "5.8754",
+        "JZZZL": "1.07",
+        "SGZT": "开放申购",
+        "SHZT": "开放赎回"
+      }
+    ],
+    "FundType": "002"
+  },
+  "ErrCode": 0,
+  "ErrMsg": null,
+  "TotalCount": 2,
+  "PageSize": 10,
+  "PageIndex": 1
+}
