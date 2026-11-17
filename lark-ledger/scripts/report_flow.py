@@ -38,7 +38,10 @@ QUERY_WHAT = ("balances", "summary", "holdings")
 ACCOUNT_NAME_FIELD = "账户名称"
 ACCOUNT_TYPE_FIELD = "类型"
 ACCOUNT_BALANCE_FIELD = "当前余额"
+ACCOUNT_STATUS_FIELD = "状态"
 VALUE_FIELD = snapshot_flow.VALUE_FIELD
+
+STATUS_ACTIVE = "在用"
 
 PathLike = Union[str, pathlib.Path]
 
@@ -183,12 +186,16 @@ def _period_points(
     live_day: datetime.date,
     live_total: Optional[float],
 ) -> List[List[Any]]:
-    """期间内快照序列 + 实时末点；同一天只保留实时值，不产生重复点。"""
+    """期间内快照序列 + 期间内的实时末点；同一天只保留实时值。
+
+    实时值只在 ``[start, end]`` 内才补：历史月份的曲线不能突兀地接到今天，
+    未来锚点也不能把今天排到最前面。
+    """
     points: List[Tuple[str, float]] = []
     for day, total in aggregate.net_worth_series(snapshots):
         if start <= datetime.date.fromisoformat(day) <= end:
             points.append((day, total))
-    if live_total is not None:
+    if live_total is not None and start <= live_day <= end:
         live_date = live_day.isoformat()
         points = [point for point in points if point[0] != live_date]
         points.append((live_date, live_total))
@@ -201,6 +208,15 @@ def _output_dir(out_dir: Optional[PathLike]) -> pathlib.Path:
     if out_dir is None:
         return pathlib.Path.home() / "Downloads" / "lark-ledger"
     return pathlib.Path(out_dir).expanduser()
+
+
+def _active_accounts(accounts: List[dict]) -> List[dict]:
+    """只保留「在用」账户；销户后余额字段不会再被脚本维护，必须排除。"""
+    return [
+        record
+        for record in accounts
+        if _option(_fields(record).get(ACCOUNT_STATUS_FIELD)) == STATUS_ACTIVE
+    ]
 
 
 def run_report(
@@ -236,7 +252,7 @@ def run_report(
     try:
         summary = aggregate.summarize(entries, categories, start, end)
         holdings_rows = aggregate.holdings_view(holdings)
-        liabilities = aggregate.liabilities_view(accounts)
+        liabilities = aggregate.liabilities_view(_active_accounts(accounts))
     except aggregate.AggregateError as exc:
         raise ReportError(str(exc)) from exc
 
@@ -334,7 +350,7 @@ def _filter_summary(summary: dict, category: str) -> dict:
 
 
 def _query_balances(cfg: dict) -> dict:
-    """账户余额：名称 + 类型 + 当前余额，按名称/类型排序。"""
+    """账户余额：名称 + 类型 + 当前余额 + 状态；合计只算「在用」账户。"""
     rows: List[dict] = []
     total = 0.0
     for record in _read_table(cfg, ACCOUNT_TABLE):
@@ -344,14 +360,17 @@ def _query_balances(cfg: dict) -> dict:
         balance = _number(
             fields.get(ACCOUNT_BALANCE_FIELD), "账户「%s」的当前余额" % label
         )
+        status = _option(fields.get(ACCOUNT_STATUS_FIELD))
         rows.append(
             {
                 "名称": label,
                 "类型": _option(fields.get(ACCOUNT_TYPE_FIELD)),
                 "余额": _money(balance),
+                "状态": status,
             }
         )
-        total += balance
+        if status == STATUS_ACTIVE:
+            total += balance
     rows.sort(key=lambda row: (row["名称"], row["类型"]))
     return {"what": "balances", "balances": rows, "total": _money(total)}
 

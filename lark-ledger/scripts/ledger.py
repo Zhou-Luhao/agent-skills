@@ -969,11 +969,16 @@ def _run_query(args: argparse.Namespace) -> int:
 
     if result["what"] == "balances":
         rows = [
-            [row["名称"], row["类型"], _money_text(row["余额"])]
+            [
+                row["名称"],
+                row["类型"],
+                _money_text(row["余额"]),
+                row["状态"],
+            ]
             for row in result["balances"]
         ]
-        print(_format_table(("账户", "类型", "当前余额（元）"), rows))
-        print("合计：%s 元" % _money_text(result["total"]))
+        print(_format_table(("账户", "类型", "当前余额（元）", "状态"), rows))
+        print("合计（在用）：%s 元" % _money_text(result["total"]))
         return EXIT_OK
 
     if result["what"] == "holdings":

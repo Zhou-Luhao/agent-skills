@@ -141,6 +141,10 @@ class ReportFlowTest(unittest.TestCase):
             account("recBank", "工资卡", "银行卡", 5000),
             account("recWealth", "证券账户", "理财", 2000),
             account("recLoan", "房贷", "负债", -300000, rate=0.042),
+            account(
+                "recOldLoan", "已销户贷款", "负债", -500000,
+                status="已销户", rate=0.05,
+            ),
         ]
         self.holdings = [
             holding("recH1", "recWealth", "贵州茅台", "sh600519", 10, 100.0)
@@ -196,6 +200,10 @@ class ReportFlowTest(unittest.TestCase):
         self.assertTrue(md.is_file())
         self.assertEqual(html.name, "ledger-week-2026-11-22.html")
         self.assertEqual(md.name, "ledger-week-2026-11-22.md")
+        # 显式 --out 必须生效：不能悄悄写到默认的 ~/Downloads。
+        expected_dir = self.root / "out"
+        self.assertEqual(html.parent, expected_dir)
+        self.assertEqual(md.parent, expected_dir)
 
         self.assertEqual(result["summary"]["income"], 30000.0)
         self.assertEqual(result["summary"]["expense"], 35.0)
@@ -223,6 +231,43 @@ class ReportFlowTest(unittest.TestCase):
         # 快照必须先于读表：曲线要含今天，数据也要包含刚落的那一行。
         self.assertIn("snapshot", self.ops)
         self.assertLess(self.ops.index("snapshot"), self.ops.index("tbl_entry"))
+
+    def test_report_omits_live_point_for_historical_period(self):
+        # 10 月报告跑在今天：实时值在期间外，曲线不能接到 2026-11-18。
+        self.snapshots.append(snapshot_row("recOct", "2026-10-10", -280000))
+        with mock.patch("snapshot_flow.run_snapshot", side_effect=self._snapshot):
+            result = report_flow.run_report(
+                self.cfg, "month", anchor="2026-10-15", out_dir=self.root / "out"
+            )
+
+        md = pathlib.Path(result["md"]).read_text(encoding="utf-8")
+        self.assertIn("| 2026-10-10 |", md)
+        self.assertNotIn("| 2026-11-18 |", md)
+        self.assertNotIn("-291,000.00", md)
+        self.assertIn("| 当前净资产 | -280,000.00 |", md)
+
+    def test_report_omits_live_point_for_future_period(self):
+        # 未来锚点：今天早于期间，不能把今天的点排到曲线最前面。
+        self.snapshots.append(snapshot_row("recJan", "2027-01-10", -100000))
+        with mock.patch("snapshot_flow.run_snapshot", side_effect=self._snapshot):
+            result = report_flow.run_report(
+                self.cfg, "month", anchor="2027-01-15", out_dir=self.root / "out"
+            )
+
+        md = pathlib.Path(result["md"]).read_text(encoding="utf-8")
+        dates = re.findall(r"^\| (\d{4}-\d{2}-\d{2}) \| .+? \|$", md, re.M)
+        self.assertEqual(dates, ["2027-01-10"])
+
+    def test_report_liabilities_exclude_closed_accounts(self):
+        # account close 不改当前余额：已销户贷款绝不能进负债概览。
+        with mock.patch("snapshot_flow.run_snapshot", side_effect=self._snapshot):
+            result = report_flow.run_report(
+                self.cfg, "week", anchor=TODAY, out_dir=self.root / "out"
+            )
+
+        md = pathlib.Path(result["md"]).read_text(encoding="utf-8")
+        self.assertIn("房贷", md)
+        self.assertNotIn("已销户贷款", md)
 
     def test_report_forces_a_real_current_snapshot(self):
         # 不 mock run_snapshot：真走一遍落表，确认报告读到了刚写的今天。
@@ -370,6 +415,9 @@ class QueryFlowTest(unittest.TestCase):
         self.accounts = [
             account("recCash", "现金", "现金", 1000),
             account("recLoan", "房贷", "负债", -300000, rate=0.042),
+            account(
+                "recClosed", "已销户卡", "银行卡", 99999, status="已销户"
+            ),
         ]
         self.holdings = [
             holding("recH1", "recWealth", "贵州茅台", "sh600519", 10, 100.0)
@@ -401,11 +449,15 @@ class QueryFlowTest(unittest.TestCase):
 
         self.assertEqual(result["what"], "balances")
         rows = {row["名称"]: row for row in result["balances"]}
-        self.assertEqual(set(rows["现金"]), {"名称", "类型", "余额"})
+        self.assertEqual(set(rows["现金"]), {"名称", "类型", "余额", "状态"})
         self.assertEqual(rows["现金"]["类型"], "现金")
         self.assertEqual(rows["现金"]["余额"], 1000.0)
+        self.assertEqual(rows["现金"]["状态"], "在用")
         self.assertEqual(rows["房贷"]["类型"], "负债")
         self.assertEqual(rows["房贷"]["余额"], -300000.0)
+        # 已销户账户照常展示（含状态），但不计入合计。
+        self.assertEqual(rows["已销户卡"]["状态"], "已销户")
+        self.assertEqual(rows["已销户卡"]["余额"], 99999.0)
         self.assertEqual(result["total"], -299000.0)
 
     def test_query_summary_excludes_transfers(self):
@@ -525,7 +577,9 @@ class ReportCliTest(unittest.TestCase):
     def test_cli_query_prints_table(self):
         result = {
             "what": "balances",
-            "balances": [{"名称": "现金", "类型": "现金", "余额": 1.0}],
+            "balances": [
+                {"名称": "现金", "类型": "现金", "余额": 1.0, "状态": "在用"}
+            ],
             "total": 1.0,
         }
         with mock.patch("report_flow.run_query", return_value=result):
@@ -533,6 +587,7 @@ class ReportCliTest(unittest.TestCase):
                 code = ledger.main(["query", "balances"])
         self.assertEqual(code, 0)
         self.assertIn("现金", out.getvalue())
+        self.assertIn("在用", out.getvalue())
         self.assertIn("合计", out.getvalue())
 
 
