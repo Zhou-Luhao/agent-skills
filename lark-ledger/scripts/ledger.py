@@ -1,7 +1,8 @@
 """lark-ledger 命令行入口。
 
 退出码约定：0 成功 / 2 参数错误 / 3 未配置或未登录 / 4 lark-cli 调用失败 / 5 数据错误。
-已实现 init（建账本）、add（记一笔）与 account / holding 主数据子命令。
+已实现 init（建账本）、add（记一笔）、edit / delete / rebuild（修正与重算）
+与 account / holding 主数据子命令。
 """
 
 import argparse
@@ -15,6 +16,7 @@ import init_flow
 import lark
 import master_data
 import posting
+import rebuild_flow
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -241,6 +243,50 @@ def _add_add_parser(subparsers) -> None:
     add.add_argument("--note", default=None, help="备注")
 
 
+def _add_edit_parser(subparsers) -> None:
+    edit = subparsers.add_parser(
+        "edit", help="修改一条明细并联动重算受影响账户/持仓"
+    )
+    edit.add_argument("record_id", help="明细 record_id")
+    edit.add_argument(
+        "--amount", type=float, default=None, help="新金额（必须大于 0）"
+    )
+    edit.add_argument("--date", default=None, help="新日期 YYYY-MM-DD")
+    edit.add_argument("--account", default=None, help="新账户名称或 record_id")
+    edit.add_argument(
+        "--category", default=None, help="新分类全名（仅收入/支出明细）"
+    )
+    edit.add_argument(
+        "--note",
+        default=None,
+        help="新备注；同组 #G tag 会自动保留，不会拆散多明细组",
+    )
+
+
+def _add_delete_parser(subparsers) -> None:
+    delete = subparsers.add_parser(
+        "delete", help="删除一条明细（同 #G 组自动整组删除并反向联动）"
+    )
+    delete.add_argument("record_id", help="明细 record_id")
+    delete.add_argument(
+        "--yes",
+        action="store_true",
+        help="整组删除（同一 #G 组超过 1 行）时必须显式确认",
+    )
+
+
+def _add_rebuild_parser(subparsers) -> None:
+    rebuild = subparsers.add_parser(
+        "rebuild",
+        help="从期初 + 全部明细重算账户余额与持仓（默认 dry-run）",
+    )
+    rebuild.add_argument(
+        "--apply",
+        action="store_true",
+        help="写入修正值；缺省只打印差异，不写任何数据",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ledger.py",
@@ -263,6 +309,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     _add_add_parser(subparsers)
+    _add_edit_parser(subparsers)
+    _add_delete_parser(subparsers)
+    _add_rebuild_parser(subparsers)
     _add_account_parsers(subparsers)
     _add_holding_parsers(subparsers)
     return parser
@@ -486,6 +535,84 @@ def _run_add(args: argparse.Namespace) -> int:
         )
     )
     return EXIT_OK
+
+
+def _run_edit(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    result = rebuild_flow.run_edit(
+        cfg,
+        args.record_id,
+        amount=args.amount,
+        date=args.date,
+        account=args.account,
+        category=args.category,
+        note=args.note,
+    )
+    _print_diagnostics(result.get("diagnostics"))
+    print(
+        "已修改明细 %s：变更 %s；重算更新 %d 项"
+        % (
+            result["record_id"],
+            "、".join(result["changed"]),
+            result["updated"],
+        )
+    )
+    return EXIT_OK
+
+
+def _run_delete(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    try:
+        result = rebuild_flow.run_delete(
+            cfg, args.record_id, yes=args.yes
+        )
+    except rebuild_flow.ConfirmationRequired as exc:
+        print("未删除：%s" % exc, file=sys.stderr)
+        return EXIT_USAGE
+    _print_diagnostics(result.get("diagnostics"))
+    print(
+        "已删除 %d 条明细：%s；重算更新 %d 项"
+        % (
+            len(result["deleted"]),
+            "、".join(result["deleted"]),
+            result["updated"],
+        )
+    )
+    return EXIT_OK
+
+
+def _diff_text(value: Any) -> str:
+    return "—" if value is None else _cell_text(value)
+
+
+def _run_rebuild(args: argparse.Namespace) -> int:
+    cfg = config.load_config()
+    result = rebuild_flow.run_rebuild(cfg, apply=args.apply)
+    _print_diagnostics(result.get("diagnostics"))
+    diff = result["diff"]
+    if not diff:
+        print("账实一致，无需修正。")
+        return EXIT_OK
+    rows = [
+        [
+            item["对象"],
+            item["字段"],
+            _diff_text(item["现值"]),
+            _diff_text(item["应为"]),
+        ]
+        for item in diff
+    ]
+    print(_format_table(("对象", "字段", "现值", "应为"), rows))
+    if args.apply:
+        print("已修正 %d 项余额/持仓。" % result["updated"])
+    else:
+        print("dry-run：未写入任何数据；确认无误后加 --apply。")
+    return EXIT_OK
+
+
+def _print_diagnostics(diagnostics) -> None:
+    for message in diagnostics or []:
+        print("诊断：%s" % message, file=sys.stderr)
 
 
 def _cell_text(value: Any) -> str:
@@ -729,6 +856,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _run_init(args)
         if args.command == "add":
             return _run_add(args)
+        if args.command == "edit":
+            return _run_edit(args)
+        if args.command == "delete":
+            return _run_delete(args)
+        if args.command == "rebuild":
+            return _run_rebuild(args)
         if args.command == "account":
             return _run_account(args)
         if args.command == "holding":

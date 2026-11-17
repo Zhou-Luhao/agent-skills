@@ -15,7 +15,7 @@ import datetime
 import math
 import random
 import re
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import loans
 
@@ -954,6 +954,601 @@ def plan_add(
         updates.extend(_holding_update(kind, entry, holdings))
 
     return {"create": creates, "update": updates}
+
+
+# ---------------------------------------------------------------------------
+# 修正与重算：把「已落库的明细行」重放成账户余额 / 持仓
+#
+# 明细行是飞书里的 CellValue，不是 add 的入参：日期可能是
+# "YYYY-MM-DD 00:00" 字符串或毫秒时间戳，关联字段是 [{"id": ...}]。
+# rebuild 只能信任「期初 + 明细」，所以这里从行数据反推每一笔的余额与
+# 持仓变动；组内买卖方向靠同组的转账行（银行卡↔理财）判断。
+# ---------------------------------------------------------------------------
+
+_TAG_PATTERN = re.compile(r"#G[0-9a-fA-F]{8}")
+_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
+_EPOCH_UTC = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+ROW_TYPES = ("收入", "支出", "转账")
+
+
+def _fields_of(row: Any) -> Dict[str, Any]:
+    """明细行 → fields；兼容 {"record_id","fields"} 与纯字段 dict。"""
+    if not isinstance(row, dict):
+        raise PostingError("明细必须是 dict，实际是 %r" % (row,))
+    fields = row.get("fields")
+    if isinstance(fields, dict):
+        return fields
+    return row
+
+
+def _row_id(row: Any) -> str:
+    value = row.get("record_id") if isinstance(row, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ""
+
+
+def _relation_ids(value: Any) -> List[str]:
+    """关联单元格 → record_id 列表；兼容 [{"id": ...}]、字符串与列表。"""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    ids: List[str] = []
+    for item in items:
+        raw = item.get("id") if isinstance(item, dict) else item
+        if isinstance(raw, str) and raw.strip():
+            ids.append(raw.strip())
+    return ids
+
+
+def _relation_id(value: Any) -> str:
+    ids = _relation_ids(value)
+    return ids[0] if ids else ""
+
+
+def note_tag(note: Any) -> Optional[str]:
+    """备注里的组 tag（如 "#G1a2b3c4d"）；没有则 None。"""
+    if not isinstance(note, str):
+        return None
+    match = _TAG_PATTERN.search(note)
+    return match.group(0) if match else None
+
+
+def row_note(fields: Dict[str, Any]) -> str:
+    value = fields.get("备注") if isinstance(fields, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def row_tag(row: Any) -> Optional[str]:
+    """明细行的组 tag；无法解析时返回 None（该行自成一组）。"""
+    try:
+        return note_tag(row_note(_fields_of(row)))
+    except PostingError:
+        return None
+
+
+def row_type(fields: Dict[str, Any]) -> str:
+    """明细「类型」→ 收入 / 支出 / 转账；无法识别返回空串。"""
+    text = _select_text(fields.get("类型") if isinstance(fields, dict) else None)
+    text = text.strip()
+    return text if text in ROW_TYPES else ""
+
+
+def _date_from_ms(ms: Any) -> str:
+    try:
+        moment = _EPOCH_UTC + datetime.timedelta(milliseconds=float(ms))
+        return moment.astimezone(_UTC8).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def row_date(fields: Dict[str, Any]) -> str:
+    """明细日期 → "YYYY-MM-DD"；支持字符串与毫秒时间戳。"""
+    raw = fields.get("日期") if isinstance(fields, dict) else None
+    if isinstance(raw, list) and raw:
+        raw = raw[0]
+    if isinstance(raw, str):
+        text = raw.strip()[:10]
+        if _DATE_PATTERN.fullmatch(text):
+            try:
+                datetime.date.fromisoformat(text)
+            except ValueError:
+                return ""
+            return text
+        return ""
+    if (
+        isinstance(raw, (int, float))
+        and not isinstance(raw, bool)
+        and math.isfinite(raw)
+    ):
+        return _date_from_ms(raw)
+    return ""
+
+
+def _created_ms(fields: Dict[str, Any]) -> float:
+    """创建时间 → 毫秒（缺失或不可解析按 0），仅用于稳定排序。"""
+    raw = fields.get("创建时间") if isinstance(fields, dict) else None
+    if isinstance(raw, list) and raw:
+        raw = raw[0]
+    if isinstance(raw, bool):
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw) if math.isfinite(raw) else 0.0
+    if isinstance(raw, str):
+        text = raw.strip()
+        for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+            try:
+                moment = datetime.datetime.strptime(text, pattern).replace(
+                    tzinfo=_UTC8
+                )
+            except ValueError:
+                continue
+            return moment.timestamp() * 1000
+    return 0.0
+
+
+def sort_rows(rows: List[Any]) -> List[Any]:
+    """按 (日期, 创建时间, record_id) 排序，结果与输入顺序无关。"""
+    decorated = []
+    for index, row in enumerate(rows or []):
+        try:
+            fields = _fields_of(row)
+        except PostingError:
+            fields = {}
+        decorated.append(
+            (
+                row_date(fields),
+                _created_ms(fields),
+                _row_id(row),
+                index,
+                row,
+            )
+        )
+    decorated.sort(key=lambda item: item[:4])
+    return [item[4] for item in decorated]
+
+
+def _group_key(row: Any) -> str:
+    tag = row_tag(row)
+    if tag is not None:
+        return "tag:" + tag.lower()
+    return "record:" + (_row_id(row) or str(id(row)))
+
+
+def group_rows(entries: List[Any], target: Any) -> List[Any]:
+    """同组明细：有 #G tag 时取全部同 tag 行，否则只有该行自身。"""
+    tag = row_tag(target)
+    if tag is None:
+        return [target]
+    needle = tag.lower()
+    matches = []
+    for row in entries or []:
+        candidate = row_tag(row)
+        if candidate is not None and candidate.lower() == needle:
+            matches.append(row)
+    if not any(_row_id(row) == _row_id(target) for row in matches):
+        matches.append(target)
+    return matches
+
+
+def group_object_ids(group: List[Any]) -> Dict[str, set]:
+    """一组明细会碰到的账户 / 持仓 id 集合（用于局部重算）。"""
+    accounts = set()
+    holdings = set()
+    for row in group or []:
+        try:
+            fields = _fields_of(row)
+        except PostingError:
+            continue
+        account = _relation_id(fields.get("账户"))
+        target = _relation_id(fields.get("转入账户"))
+        if account:
+            accounts.add(account)
+        if target:
+            accounts.add(target)
+        holding = _relation_id(fields.get("持仓"))
+        if holding:
+            holdings.add(holding)
+    return {"accounts": accounts, "holdings": holdings}
+
+
+def _row_cash_deltas(fields: Dict[str, Any]) -> Dict[str, float]:
+    """明细行对账户余额的变动（与 balance_deltas 同一口径）。
+
+    自转行（账户 == 转入账户，理财买卖的份额行）净额为 0；普通转账是
+    「来源 −、转入 +」。收入/支出的金额可为负（卖出亏损的已实现盈亏行）。
+    """
+    kind = row_type(fields)
+    if not kind:
+        raise PostingError("明细的「类型」不是 %s" % " / ".join(ROW_TYPES))
+    amount = round(_number(fields.get("金额"), "明细金额"), 2)
+    account = _relation_id(fields.get("账户"))
+    if not account:
+        raise PostingError("明细缺少「账户」")
+    if kind == "收入":
+        return {account: amount}
+    if kind == "支出":
+        return {account: round(-amount, 2)}
+    target = _relation_id(fields.get("转入账户"))
+    if not target:
+        raise PostingError("转账明细缺少「转入账户」")
+    if target == account:
+        return {}
+    return {account: round(-amount, 2), target: amount}
+
+
+def _trade_direction(row: Any, group: List[Any]) -> Optional[str]:
+    """组内买卖方向：同组另一条普通转账行的资金方向决定 buy / sell。"""
+    fields = _fields_of(row)
+    account = _relation_id(fields.get("账户"))
+    if not account:
+        return None
+    found: Optional[str] = None
+    for other in group:
+        if other is row:
+            continue
+        try:
+            other_fields = _fields_of(other)
+        except PostingError:
+            continue
+        if row_type(other_fields) != "转账":
+            continue
+        if _relation_id(other_fields.get("持仓")):
+            continue
+        source = _relation_id(other_fields.get("账户"))
+        target = _relation_id(other_fields.get("转入账户"))
+        if not source or not target or source == target:
+            continue
+        if target == account:
+            candidate = "buy"
+        elif source == account:
+            candidate = "sell"
+        else:
+            continue
+        if found is not None and found != candidate:
+            return None
+        found = candidate
+    return found
+
+
+def _number_or_none(value: Any) -> Optional[float]:
+    try:
+        return _number(value, "数值")
+    except PostingError:
+        return None
+
+
+def _is_trade_row(row: Any) -> bool:
+    """是否为理财买卖的份额行（类型=转账 + 带持仓）。"""
+    try:
+        fields = _fields_of(row)
+    except PostingError:
+        return False
+    return row_type(fields) == "转账" and bool(
+        _relation_id(fields.get("持仓"))
+    )
+
+
+def _group_label(group: List[Any]) -> str:
+    for row in group:
+        tag = row_tag(row)
+        if tag:
+            return tag
+    return _row_id(group[0]) if group else "?"
+
+
+def _group_account_deltas(group: List[Any]) -> Dict[str, float]:
+    """一组明细 → 与 add 的 `balance_deltas` 同口径的账户变动。
+
+    含持仓交易行的组是理财买卖：理财账户的「当前余额」只是账户内闲置
+    现金，买卖本身不改变它——买入时钱从银行卡出去、进入持仓；卖出时份额
+    变回现金再转出。因此这里只取外部账户（银行卡/现金）那一条腿：
+
+    - 买入：转出账户 −转账金额（不能给理财账户 +金额，那是行级求和的错误）；
+    - 卖出：转入账户 +转账金额（不能扣理财账户，也不要把盈亏行当现金收入）。
+
+    其它组（收支/转账/贷款本息/分红）的行级 deltas 之和恰好等于 add 的
+    `balance_deltas`，逐行相加即可。
+    """
+    rows = list(group or [])
+    trade_rows = [row for row in rows if _is_trade_row(row)]
+    if not trade_rows:
+        totals: Dict[str, float] = {}
+        for row in rows:
+            deltas = _row_cash_deltas(_fields_of(row))
+            for account_id, delta in deltas.items():
+                totals[account_id] = round(
+                    totals.get(account_id, 0.0) + delta, 2
+                )
+        return totals
+
+    if len(trade_rows) > 1:
+        raise PostingError("同组出现多条持仓交易行，无法确定买卖金额")
+    trade = trade_rows[0]
+    trade_fields = _fields_of(trade)
+    account = _relation_id(trade_fields.get("账户"))
+    if not account:
+        raise PostingError("持仓交易行缺少账户")
+    if _relation_id(trade_fields.get("转入账户")) != account:
+        raise PostingError("持仓交易行的账户与转入账户不一致")
+
+    direction = _trade_direction(trade, rows)
+    if direction is None:
+        raise PostingError(
+            "无法判断买卖方向（组内缺少银行卡↔理财的转账行）"
+        )
+
+    for row in rows:
+        if row is trade:
+            continue
+        fields = _fields_of(row)
+        if row_type(fields) != "转账" or _relation_id(fields.get("持仓")):
+            continue
+        source = _relation_id(fields.get("账户"))
+        target = _relation_id(fields.get("转入账户"))
+        if not source or not target or source == target:
+            continue
+        amount = round(_number(fields.get("金额"), "明细金额"), 2)
+        if direction == "buy" and target == account:
+            return {source: round(-amount, 2)}
+        if direction == "sell" and source == account:
+            return {target: round(amount, 2)}
+
+    raise PostingError("组内缺少银行卡↔理财的方向转账行，无法重放资金")
+
+
+def replay(
+    entries: List[Any],
+    accounts: Dict[str, dict],
+    holdings: Dict[str, dict],
+) -> dict:
+    """从 初始余额 / 期初份额 / 期初成本 起逐笔重放全部明细。
+
+    返回 `{"accounts": {id: balance},
+           "holdings": {id: {"shares": s, "cost": c}},
+           "diagnostics": ["..."]}`。
+
+    按 (日期, 创建时间, record_id) 排序后以「明细组」为单位重放：同一
+    #G tag 的多行是一笔操作（贷款本息、理财买卖），账户变动按
+    `_group_account_deltas` 还原成 add 的 `balance_deltas` 口径。
+    绝不对明细行做朴素求和：理财买入的转账行会给理财账户 +金额，而按
+    add 语义理财账户闲置现金不变，行级求和会重复计入。
+    引用了已删除账户/持仓（或类型无法识别）的行只记诊断并跳过，不抛出。
+    """
+    account_fields = accounts if isinstance(accounts, dict) else {}
+    holding_fields = holdings if isinstance(holdings, dict) else {}
+    diagnostics: List[str] = []
+
+    balances: Dict[str, float] = {}
+    for account_id, fields in account_fields.items():
+        opening = _number_or_none(
+            fields.get("初始余额") if isinstance(fields, dict) else None
+        )
+        if opening is None:
+            diagnostics.append(
+                "账户「%s」缺少可用的初始余额，按 0 重算" % account_id
+            )
+            opening = 0.0
+        balances[account_id] = round(opening, 2)
+
+    states: Dict[str, Dict[str, float]] = {}
+    for holding_id, fields in holding_fields.items():
+        shares = _number_or_none(
+            fields.get("期初份额") if isinstance(fields, dict) else None
+        )
+        cost = _number_or_none(
+            fields.get("期初成本") if isinstance(fields, dict) else None
+        )
+        if shares is None:
+            diagnostics.append(
+                "持仓「%s」缺少可用的期初份额，按 0 重算" % holding_id
+            )
+            shares = 0.0
+        if cost is None:
+            diagnostics.append(
+                "持仓「%s」缺少可用的期初成本，按 0 重算" % holding_id
+            )
+            cost = 0.0
+        states[holding_id] = {
+            "shares": round(shares, 4),
+            "cost": round(cost, 4),
+        }
+
+    rows = sort_rows(entries)
+    groups: Dict[str, List[Any]] = {}
+    ordered_groups: List[List[Any]] = []
+    for row in rows:
+        key = _group_key(row)
+        if key not in groups:
+            groups[key] = []
+            ordered_groups.append(groups[key])
+        groups[key].append(row)
+
+    for group in ordered_groups:
+        label = _group_label(group)
+        try:
+            deltas = _group_account_deltas(group)
+        except PostingError as exc:
+            diagnostics.append(
+                "明细组「%s」无法重放（%s），已整组跳过" % (label, exc)
+            )
+            continue
+        missing = sorted(
+            account_id for account_id in deltas if account_id not in balances
+        )
+        if missing:
+            diagnostics.append(
+                "明细组「%s」引用的账户 %s 不存在，已整组跳过"
+                % (label, "、".join(missing))
+            )
+            continue
+        for account_id, delta in deltas.items():
+            balances[account_id] = round(balances[account_id] + delta, 2)
+
+        for row in group:
+            if not _is_trade_row(row):
+                continue
+            record_id = _row_id(row) or "?"
+            fields = _fields_of(row)
+            holding_id = _relation_id(fields.get("持仓"))
+            if holding_id not in states:
+                diagnostics.append(
+                    "明细「%s」引用的持仓「%s」不存在，持仓未更新"
+                    % (record_id, holding_id)
+                )
+                continue
+            price = _number_or_none(fields.get("成交价"))
+            quantity = _number_or_none(fields.get("份额"))
+            if price is None or quantity is None or price <= 0 or quantity <= 0:
+                diagnostics.append(
+                    "明细「%s」的成交价/份额不可用，持仓未更新" % record_id
+                )
+                continue
+            direction = _trade_direction(row, group)
+            if direction is None:
+                diagnostics.append(
+                    "明细「%s」无法判断买卖方向，持仓未更新" % record_id
+                )
+                continue
+            state = states[holding_id]
+            if direction == "buy":
+                try:
+                    state["cost"] = weighted_cost(
+                        state["shares"], state["cost"], quantity, price
+                    )
+                except PostingError as exc:
+                    diagnostics.append(
+                        "明细「%s」买入成本无法重算（%s），持仓未更新"
+                        % (record_id, exc)
+                    )
+                    continue
+                state["shares"] = round(state["shares"] + quantity, 4)
+            else:
+                remaining = round(state["shares"] - quantity, 4)
+                if abs(remaining) < 1e-9:
+                    remaining = 0.0
+                if remaining < 0:
+                    diagnostics.append(
+                        "持仓「%s」在明细「%s」卖出后份额为负，按 0 处理"
+                        % (holding_id, record_id)
+                    )
+                    remaining = 0.0
+                state["shares"] = remaining
+
+    return {"accounts": balances, "holdings": states, "diagnostics": diagnostics}
+
+
+def plan_delete(
+    group: List[Any],
+    accounts: Dict[str, dict],
+    holdings: Dict[str, dict],
+) -> WritePlan:
+    """整组删除的反向计划（纯算术，供调用方展示/局部回滚）。
+
+    账户按组级 deltas 反向（理财买卖只回退外部账户那条腿）；持仓按组内
+    交易逆序回退（买入回退份额并按反向加权成本还原成本价，卖出回补份额、
+    成本不变）。删除后的最终一致性仍以 `replay` 的绝对值为准——当前余额
+    可能已被外部改动。
+    """
+    account_fields = accounts if isinstance(accounts, dict) else {}
+    holding_fields = holdings if isinstance(holdings, dict) else {}
+    rows = sort_rows(group)
+
+    delete_ids = [
+        record_id for record_id in (_row_id(row) for row in rows) if record_id
+    ]
+    try:
+        totals = _group_account_deltas(rows)
+    except PostingError:
+        totals = {}
+
+    updates: List[Tuple[str, str, Dict[str, Any]]] = []
+    for account_id in sorted(totals):
+        fields = account_fields.get(account_id)
+        current = _number_or_none(
+            fields.get("当前余额") if isinstance(fields, dict) else None
+        )
+        if current is None:
+            continue
+        updates.append(
+            (
+                ACCOUNT_TABLE,
+                account_id,
+                {"当前余额": round(current - totals[account_id], 2)},
+            )
+        )
+
+    states: Dict[str, Dict[str, float]] = {}
+    for holding_id, fields in holding_fields.items():
+        if not isinstance(fields, dict):
+            continue
+        shares = _number_or_none(fields.get("当前份额"))
+        cost = _number_or_none(fields.get("成本价"))
+        if shares is None or cost is None:
+            continue
+        states[holding_id] = {
+            "shares": round(shares, 4),
+            "cost": round(cost, 4),
+        }
+
+    for row in reversed(rows):
+        try:
+            fields = _fields_of(row)
+        except PostingError:
+            continue
+        holding_id = _relation_id(fields.get("持仓"))
+        if not holding_id or row_type(fields) != "转账":
+            continue
+        if _relation_id(fields.get("账户")) != _relation_id(
+            fields.get("转入账户")
+        ):
+            continue
+        if holding_id not in states:
+            continue
+        direction = _trade_direction(row, rows)
+        if direction is None:
+            continue
+        quantity = _number_or_none(fields.get("份额"))
+        price = _number_or_none(fields.get("成交价"))
+        if quantity is None or price is None or quantity <= 0:
+            continue
+        state = states[holding_id]
+        if direction == "buy":
+            remaining = round(state["shares"] - quantity, 4)
+            if remaining <= 1e-9:
+                state["shares"] = 0.0
+                # 买入全部回退后，期初成本无法由当前值反推；置 0，最终以 replay 为准。
+                state["cost"] = 0.0
+            else:
+                total_cost = state["cost"] * state["shares"] - price * quantity
+                state["shares"] = remaining
+                state["cost"] = round(max(total_cost, 0.0) / remaining, 4)
+        else:
+            state["shares"] = round(state["shares"] + quantity, 4)
+
+    for holding_id in sorted(states):
+        fields = holding_fields.get(holding_id)
+        if not isinstance(fields, dict):
+            continue
+        current_shares = _number_or_none(fields.get("当前份额"))
+        current_cost = _number_or_none(fields.get("成本价"))
+        if current_shares is None or current_cost is None:
+            continue
+        if (
+            abs(current_shares - states[holding_id]["shares"]) < 1e-9
+            and abs(current_cost - states[holding_id]["cost"]) < 1e-9
+        ):
+            continue
+        updates.append(
+            (
+                HOLDING_TABLE,
+                holding_id,
+                {
+                    "当前份额": states[holding_id]["shares"],
+                    "成本价": states[holding_id]["cost"],
+                },
+            )
+        )
+
+    return {"create": [], "delete": delete_ids, "update": updates}
 
 
 def weighted_cost(
