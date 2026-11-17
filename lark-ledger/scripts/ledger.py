@@ -800,12 +800,9 @@ def _holding_edit_fields(args: argparse.Namespace) -> dict:
 
 def _run_quotes(args: argparse.Namespace) -> int:
     cfg = config.load_config()
-    try:
-        result = quotes_flow.run_quotes(cfg, force=args.force)
-    except config.ConfigError as exc:
-        # 配置不完整时一条都没法跑；源级告警不算失败（正常返回 0）。
-        print("配置错误：%s" % exc, file=sys.stderr)
-        return EXIT_LARK
+    # ConfigError（含 save_config 失败）由 main 统一映射为退出 3；
+    # LarkError = 4；行情源告警不改变退出码。
+    result = quotes_flow.run_quotes(cfg, force=args.force)
     if result.get("skipped"):
         print(
             "行情未运行：未到 15:05 或今天已经更新过；"
@@ -816,7 +813,7 @@ def _run_quotes(args: argparse.Namespace) -> int:
     for error in errors:
         print("警告：%s" % error, file=sys.stderr)
     print(
-        "行情更新完成：更新 %d 项，待回补 %d 条，告警 %d 个。"
+        "行情更新完成：更新 %d 项，窗口内待回补 %d 条，告警 %d 个。"
         % (result["updated"], result["pending"], len(errors))
     )
     return EXIT_OK

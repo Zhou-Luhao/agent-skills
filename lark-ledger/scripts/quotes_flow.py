@@ -20,8 +20,8 @@ import quotes
 
 TZ_UTC8 = datetime.timezone(datetime.timedelta(hours=8))
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# 个人账本的行情快照量级远小于此；一次读尽，避免翻页循环。
-RECORD_LIMIT = 10000
+# 行情快照会无限增长，必须按页读到"短页"为止；不能用总量上限静默截断。
+PAGE_SIZE = 200
 STATUS_HELD = "持有"
 
 
@@ -92,7 +92,7 @@ def _load_held_holdings(
     app_token: str, table_id: str
 ) -> Dict[str, dict]:
     """状态=持有的持仓，按 record_id 索引（plan_updates 的入参形状）。"""
-    records = lark.search_records(app_token, table_id, limit=RECORD_LIMIT)
+    records = _search_all(app_token, table_id)
     held: Dict[str, dict] = {}
     for record in records:
         fields = _fields(record)
@@ -106,8 +106,51 @@ def _load_held_holdings(
     return held
 
 
+def _search_all(app_token: str, table_id: str) -> List[dict]:
+    """按 200 行/页读到短页为止；翻页不推进时显式报错，绝不静默截断。
+
+    行情快照只增不减：一旦超过旧的固定上限，窗口行会落在切片外，
+    `plan_updates` 就会给同一个「代码_日期」再建一行。这里改为
+    分页读尽，并在后端返回重复页（游标没前进）时抛 LarkError。
+    """
+    records: List[dict] = []
+    offset = 0
+    previous_first_id: Optional[str] = None
+    while True:
+        page = list(
+            lark.search_records(
+                app_token, table_id, limit=PAGE_SIZE, offset=offset
+            )
+            or []
+        )
+        if not page:
+            return records
+        records.extend(page)
+        if len(page) > PAGE_SIZE:
+            # 后端（或测试桩）没遵守 limit，已一次返回更多行：视为读尽。
+            return records
+        if len(page) < PAGE_SIZE:
+            return records
+        first_id = _record_id(page[0])
+        if first_id and first_id == previous_first_id:
+            raise lark.LarkError(
+                "读取表 %s 时分页未推进（offset=%d，page_size=%d）："
+                "拒绝静默截断" % (table_id, offset, PAGE_SIZE)
+            )
+        previous_first_id = first_id
+        offset += len(page)
+
+
 def _load_quote_rows(app_token: str, table_id: str) -> List[dict]:
-    return list(lark.search_records(app_token, table_id, limit=RECORD_LIMIT))
+    return _search_all(app_token, table_id)
+
+
+def _row_code(fields: Dict[str, Any]) -> str:
+    """行代码：优先「代码」字段，退回「代码-日期」主字段的前缀。"""
+    code = _text(fields.get(quotes.CODE_FIELD))
+    if code:
+        return code
+    return _text(fields.get(quotes.PRIMARY_FIELD)).rpartition("_")[0]
 
 
 def _pending_dates(rows: List[dict]) -> List[datetime.date]:
@@ -122,6 +165,28 @@ def _pending_dates(rows: List[dict]) -> List[datetime.date]:
         except ValueError:
             continue
     return days
+
+
+def _pending_codes(
+    rows: List[dict], window: List[datetime.date]
+) -> Set[str]:
+    """窗口内待回补行涉及的代码（含已清仓持仓——它们仍需要回补）。"""
+    days = set(window)
+    codes: Set[str] = set()
+    for record in rows:
+        fields = _fields(record)
+        if _status(fields) != quotes.STATUS_PENDING:
+            continue
+        try:
+            day = quotes._as_date(fields.get(quotes.DATE_FIELD))
+        except ValueError:
+            continue
+        if day not in days:
+            continue
+        code = _row_code(fields)
+        if code:
+            codes.add(code)
+    return codes
 
 
 def _fetch_all(
@@ -229,6 +294,7 @@ def run_quotes(
 
     - 非 force 且 `quotes.should_run` 不满足 → `{"skipped": True}`；
     - 单代码源失败 → 警告进 `errors`，其余代码照常落表；
+    - 全部待抓代码都失败 → 不写表、不记 `last_quotes_date`（同日可重试）；
     - 写表失败向上抛 `lark.LarkError`（此时不写配置，下次可重试）。
     """
     moment = _now() if now is None else now
@@ -256,8 +322,17 @@ def run_quotes(
             for record in held.values()
             if _text(_fields(record).get(quotes.CODE_FIELD))
         }
+        | _pending_codes(rows, window)
     )
     fetched, errors, failed_codes = _fetch_all(codes, window)
+
+    # 全部待抓代码都失败：没有任何成功写入，不能标记"今天已跑过"，
+    # 这样同一交易时段的下一次 add 还会重试；只要有一个成功就照常记账。
+    if codes and failed_codes == set(codes):
+        pending = _count_pending(
+            rows, {"create": [], "update": []}, window
+        )
+        return {"updated": 0, "pending": pending, "errors": errors}
 
     # 源故障的代码不参加 plan：否则会造出"待回补"假象、掩盖接口故障。
     plan_holdings = {

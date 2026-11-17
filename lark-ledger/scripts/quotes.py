@@ -485,7 +485,8 @@ def plan_updates(
 
     - 命中新价的既有「待回补/已落」行 → update（待回补同时置已落）；
     - 窗口内没抓到的持仓代码日期 → create 空值「待回补」行；
-    - 抓到的窗口外日期、非持仓代码一律忽略；
+    - 窗口内既有待回补行即使持仓已清仓也参与回补（不建新行）；
+    - 抓到的窗口外日期、非持仓且无待回补行的代码一律忽略；
     - 持仓最新价/最新价日期 = 该代码最新「已落」值（不回退旧日期）；
     - 待回补超过 7 天 → update 状态「无数据」。
     """
@@ -532,9 +533,17 @@ def plan_updates(
         if price is not None:
             filled[(info.code, info.day.isoformat())] = price
 
-    # 3) 窗口 × 持仓代码：命中就填，没命中就补空行。
+    # 3) 窗口 ×（持仓代码 ∪ 窗口内待回补代码）：命中就填；
+    #    只有仍在持仓的代码才补空行，已清仓持仓的待回补行也要能回补。
     creates: List[Tuple[str, str, Dict[str, Any]]] = []
-    for code in sorted(held):
+    pending_codes = {
+        info.code
+        for info in infos.values()
+        if info.status == STATUS_PENDING
+        and info.day.isoformat() in window_text
+    }
+    for code in sorted(set(held) | pending_codes):
+        is_held = code in held
         values = fetch_map.get(code, {})
         for day in window_text:
             key = "%s_%s" % (code, day)
@@ -544,6 +553,8 @@ def plan_updates(
                 # 已判过期（无数据）：过期是终态，不能被迟到价格复活。
                 continue
             if info is None:
+                if not is_held:
+                    continue
                 status = STATUS_FILLED if value is not None else STATUS_PENDING
                 creates.append(
                     (code, day, _new_quote_row(code, day, value, status))

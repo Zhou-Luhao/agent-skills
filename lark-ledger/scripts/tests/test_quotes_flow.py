@@ -13,6 +13,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -124,10 +125,13 @@ class QuotesFlowTestBase(unittest.TestCase):
     def _search(self, app_token, table_id, conditions=None, limit=2000, offset=0):
         self.search_calls.append(table_id)
         if table_id == "tbl_holding":
-            return copy.deepcopy(self.holdings)
-        if table_id == "tbl_quote":
-            return copy.deepcopy(self.quote_rows)
-        raise AssertionError("未知的 table_id：%r" % (table_id,))
+            records = self.holdings
+        elif table_id == "tbl_quote":
+            records = self.quote_rows
+        else:
+            raise AssertionError("未知的 table_id：%r" % (table_id,))
+        page = records[offset : offset + limit]
+        return copy.deepcopy(page)
 
     def _create(self, app_token, table_id, records):
         self.created.append((table_id, copy.deepcopy(records)))
@@ -235,6 +239,39 @@ class RunQuotesTest(QuotesFlowTestBase):
         self.assertEqual(stock_row["状态"], ["已落"])
         # 源故障 ≠ 净值未公布：不能给失败代码造待回补行。
         self.assertIsNone(self.created_by_key("110011", "2026-11-18"))
+        # 部分成功照常记 last_quotes_date。
+        reloaded = config.load_config()
+        self.assertEqual(reloaded["last_quotes_date"], "2026-11-18")
+
+    def test_all_sources_failed_does_not_stamp_config(self):
+        """每个待抓代码都失败：不写表、不记 last_quotes_date，同日可重试。"""
+        self.holdings = [
+            holding("recH1", "sh600519"),
+            holding("recH2", "110011"),
+        ]
+        self.fetch_stock.side_effect = quotes.QuoteSourceError("新浪挂了")
+        self.fetch_fund.side_effect = quotes.QuoteSourceError("东财挂了")
+
+        result = quotes_flow.run_quotes(
+            self.cfg, force=True, now=NOW_AFTER_WINDOW
+        )
+
+        self.assertEqual(len(result["errors"]), 2)
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.updated, [])
+        reloaded = config.load_config()
+        self.assertIsNone(reloaded["last_quotes_date"])
+
+    def test_same_day_run_quotes_skips(self):
+        """run_quotes 自身也守住同日只跑一次（不只 maybe_run 有 gate）。"""
+        self.cfg["last_quotes_date"] = "2026-11-18"
+
+        result = quotes_flow.run_quotes(self.cfg, now=NOW_AFTER_WINDOW)
+
+        self.assertTrue(result.get("skipped"))
+        self.assertEqual(self.search_calls, [])
+        self.assertEqual(self.fetch_stock.call_count, 0)
 
     def test_maybe_run_swallows_errors(self):
         """任何底层失败都不得从 maybe_run 逃出去阻塞记账。"""
@@ -319,6 +356,112 @@ class RunQuotesTest(QuotesFlowTestBase):
             "110011", "2026-11-13", "2026-11-18"
         )
 
+    def test_cleared_holding_pending_row_is_backfilled(self):
+        """已清仓持仓的窗口内待回补行仍要回补（不能因不在持仓表而退成无数据）。"""
+        self.holdings = []  # 持仓已清仓：不在「持有」集合
+        self.quote_rows = [quote_row("recQ1", "sh600519", "2026-11-17")]
+        self.fetch_stock.side_effect = lambda code: {"2026-11-17": 1450.1}
+
+        result = quotes_flow.run_quotes(
+            self.cfg, force=True, now=NOW_AFTER_WINDOW
+        )
+
+        self.fetch_stock.assert_called_once_with("sh600519")
+        self.assertEqual(
+            self.updated_fields("recQ1"),
+            {"收盘价/净值": 1450.1, "状态": ["已落"]},
+        )
+        self.assertIsNone(self.created_by_key("sh600519", "2026-11-17"))
+        self.assertEqual(result["errors"], [])
+
+    def test_empty_fund_response_marks_single_pending(self):
+        """成功但空响应（净值未公布）→ 一条待回补行，价格 None，无告警。"""
+        self.holdings = [
+            holding("recH2", "110011", latest=4.08, latest_date="2026-11-17")
+        ]
+        self.quote_rows = [
+            quote_row(
+                "recQ16", "110011", "2026-11-16", status="已落", price=4.07
+            ),
+            quote_row(
+                "recQ17", "110011", "2026-11-17", status="已落", price=4.08
+            ),
+        ]
+        self.fetch_fund.side_effect = lambda code, start, end: {}
+
+        result = quotes_flow.run_quotes(
+            self.cfg, force=True, now=NOW_AFTER_WINDOW
+        )
+
+        created = self.created_by_key("110011", "2026-11-18")
+        self.assertIsNotNone(created)
+        self.assertIsNone(created["收盘价/净值"])
+        self.assertEqual(created["状态"], ["待回补"])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["pending"], 1)
+
+    def test_failed_source_leaves_existing_pending_row_intact(self):
+        """既有待回补行遇到源故障：保持待回补，不写值与状态。"""
+        self.holdings = [holding("recH1", "sh600519")]
+        self.quote_rows = [quote_row("recQ1", "sh600519", "2026-11-17")]
+        self.fetch_stock.side_effect = quotes.QuoteSourceError("新浪超时")
+
+        result = quotes_flow.run_quotes(
+            self.cfg, force=True, now=NOW_AFTER_WINDOW
+        )
+
+        self.assertEqual(result["updated"], 0)
+        self.assertIsNone(self.updated_fields("recQ1"))
+        self.assertIsNone(self.created_by_key("sh600519", "2026-11-17"))
+        self.assertNotEqual(result["errors"], [])
+
+    def test_reads_past_old_cap_without_duplicate(self):
+        """快照表恰好旧上限 10000 行：分页读尽，末行待回补仍原地回补。"""
+        self.holdings = [holding("recH1", "sh600519")]
+        filler = [
+            quote_row(
+                "rec_f_%d" % index,
+                "sh600519",
+                "2020-01-01",
+                status="已落",
+                price=1.0,
+            )
+            for index in range(9999)
+        ]
+        self.quote_rows = filler + [
+            quote_row("recQ_last", "sh600519", "2026-11-17")
+        ]
+        self.fetch_stock.side_effect = lambda code: {"2026-11-17": 1450.1}
+
+        quotes_flow.run_quotes(self.cfg, force=True, now=NOW_AFTER_WINDOW)
+
+        quote_searches = self.search_calls.count("tbl_quote")
+        self.assertGreater(quote_searches, 1)
+        self.assertEqual(
+            self.updated_fields("recQ_last"),
+            {"收盘价/净值": 1450.1, "状态": ["已落"]},
+        )
+        self.assertIsNone(self.created_by_key("sh600519", "2026-11-17"))
+
+    def test_stuck_pagination_raises_instead_of_truncating(self):
+        """后端重复返回同一满页（游标不前进）→ 显式报错，绝不静默截断。"""
+
+        def stuck(app_token, table_id, conditions=None, limit=2000, offset=0):
+            if table_id == "tbl_holding":
+                return []
+            return [
+                quote_row("rec_same_%d" % index, "sh600519", "2020-01-01")
+                for index in range(limit)
+            ]
+
+        with mock.patch("lark.search_records", side_effect=stuck):
+            with self.assertRaises(lark.LarkError) as caught:
+                quotes_flow.run_quotes(
+                    self.cfg, force=True, now=NOW_AFTER_WINDOW
+                )
+
+        self.assertIn("分页", str(caught.exception))
+
     def test_cli_source_failure_exits_zero(self):
         """源告警不影响退出码：CLI 仍返回 0。"""
         self.holdings = [
@@ -336,8 +479,8 @@ class RunQuotesTest(QuotesFlowTestBase):
         self.assertIn("行情", out.getvalue())
         self.assertIn("东财 502", err.getvalue())
 
-    def test_cli_config_failure_exits_four(self):
-        """配置/飞书失败导致一条都没法跑时退出 4。"""
+    def test_cli_config_failure_exits_three(self):
+        """本地配置不完整 → 退出 3（配置问题，不是飞书故障）。"""
         self.config_path.write_text(
             json.dumps({"app_token": "app1", "tables": {}}), encoding="utf-8"
         )
@@ -346,8 +489,36 @@ class RunQuotesTest(QuotesFlowTestBase):
             with captured_output() as (out, err):
                 code = ledger.main(["quotes", "--force"])
 
-        self.assertEqual(code, 4)
+        self.assertEqual(code, 3)
         self.assertIn("配置错误", err.getvalue())
+
+    def test_cli_save_failure_exits_three(self):
+        """写配置失败（ConfigError）也是退出 3。"""
+        self.holdings = [holding("recH1", "sh600519")]
+        self.fetch_stock.side_effect = lambda code: {"2026-11-18": 3.0}
+
+        with mock.patch("quotes_flow._now", return_value=NOW_AFTER_WINDOW):
+            with mock.patch(
+                "config.save_config",
+                side_effect=config.ConfigError("磁盘满了"),
+            ):
+                with captured_output() as (out, err):
+                    code = ledger.main(["quotes", "--force"])
+
+        self.assertEqual(code, 3)
+        self.assertIn("配置错误", err.getvalue())
+
+    def test_cli_lark_failure_exits_four(self):
+        """飞书调用失败 → 退出 4。"""
+        with mock.patch("quotes_flow._now", return_value=NOW_AFTER_WINDOW):
+            with mock.patch(
+                "lark.search_records", side_effect=lark.LarkError("飞书挂了")
+            ):
+                with captured_output() as (out, err):
+                    code = ledger.main(["quotes", "--force"])
+
+        self.assertEqual(code, 4)
+        self.assertIn("飞书调用失败", err.getvalue())
 
 
 class FetchLayerTest(unittest.TestCase):
@@ -396,13 +567,34 @@ class FetchLayerTest(unittest.TestCase):
             with self.assertRaises(quotes.QuoteSourceError):
                 quotes.fetch_stock("sh600519")
 
-    def test_fetch_transport_error_raises_quote_error(self):
+    def test_urlopen_urlerror_wrapped_with_timeout_and_ua(self):
+        """真实传输层错误（URLError）→ QuoteSourceError；请求带 timeout 与 UA。"""
         with mock.patch(
-            "quotes._http_get",
-            side_effect=quotes.QuoteSourceError("timed out"),
-        ):
+            "urllib.request.urlopen",
+            side_effect=urllib.error.URLError("dns failure"),
+        ) as urlopen:
             with self.assertRaises(quotes.QuoteSourceError):
                 quotes.fetch_stock("sh600519")
+
+        request = urlopen.call_args[0][0]
+        self.assertEqual(urlopen.call_args[1]["timeout"], 15)
+        self.assertEqual(request.get_header("User-agent"), quotes.BROWSER_UA)
+
+    def test_urlopen_timeout_wrapped_for_fund_with_referer(self):
+        """超时同样转 QuoteSourceError；基金请求必须携带 Referer。"""
+        with mock.patch(
+            "urllib.request.urlopen", side_effect=TimeoutError("timed out")
+        ) as urlopen:
+            with self.assertRaises(quotes.QuoteSourceError):
+                quotes.fetch_fund("110011", "2026-11-13", "2026-11-18")
+
+        request = urlopen.call_args[0][0]
+        self.assertEqual(urlopen.call_args[1]["timeout"], 15)
+        self.assertEqual(
+            request.get_header("Referer"),
+            "https://fundf10.eastmoney.com/jjjz_110011.html",
+        )
+        self.assertEqual(request.get_header("User-agent"), quotes.BROWSER_UA)
 
     def test_fetch_rejects_wrong_code_kind(self):
         with self.assertRaises(ValueError):
