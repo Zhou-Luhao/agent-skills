@@ -290,6 +290,44 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(replayed["accounts"]["a_bank"], 9000.0)
         self.assertEqual(replayed["accounts"]["a_loan"], -499100.0)
 
+    def test_replay_loan_repay_from_investment_account_not_tainted(self):
+        # 余额宝（类型=理财）也可以作为贷款还款的付款账户：add 不限制付款方
+        # 类型，principal 行是 tagged 的 理财→负债 转账、没有持仓交易行。
+        # 这不是「丢了买入成交行」，不能被 _missing_trade_row 误判为 tainted。
+        accounts = {
+            "a_yuebao": account_record(
+                "a_yuebao", "余额宝", "理财", 10000
+            )["fields"],
+            "a_loan": account_record(
+                "a_loan", "房贷", "负债", -500000, rate=0.042
+            )["fields"],
+        }
+        entry = {
+            "kind": "loan_repay",
+            "date": DATE,
+            "amount": 3000,
+            "account": "a_yuebao",
+            "loan_account": "a_loan",
+            "interest_category": "c_food",
+            "note": "",
+        }
+        plan = posting.plan_add(entry, copy.deepcopy(accounts), {})
+        rows = []
+        for index, (table, fields) in enumerate(plan["create"]):
+            self.assertEqual(table, "收支明细")
+            item = dict(fields)
+            item["日期"] = item["日期"] + " 00:00"
+            item["创建时间"] = 1000 + index
+            rows.append({"record_id": "r%d" % index, "fields": item})
+
+        replayed = posting.replay(rows, copy.deepcopy(accounts), {})
+
+        self.assertFalse(replayed["tainted"])
+        self.assertEqual(replayed["diagnostics"], [])
+        # 付款账户 −总额；负债账户只被本金推动（利息 1750、本金 1250）。
+        self.assertEqual(replayed["accounts"]["a_yuebao"], 7000.0)
+        self.assertEqual(replayed["accounts"]["a_loan"], -498750.0)
+
     def test_replay_missing_account_reports_diagnostic(self):
         accounts = {"a1": account_record("a1", "现金", "现金", 1000)["fields"]}
         entries = [entry_row("e1", "支出", 35, "ghost")]
