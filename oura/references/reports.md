@@ -42,6 +42,12 @@
   并在环比区块写明「本期截至 D（N 天），与上期同天数对比」
 - 不要用「本周 3 天的总量」去比「上周 7 天的总量」——那必然显得大幅下降
 
+## 语言与版本
+
+- 报告正文、指标名与 API 枚举值一律中文：压力总结（`restored`/`normal`/`stressful`）、恢复力等级（`limited`…`exceptional`）、就寝建议状态、锻炼类型与强度、会话类型与心情、戒指型号/颜色/硬件代数都走中文映射。映射表里没有的新枚举值回落为 API 原值，渲染不报错。
+- REM、HRV、SpO2、VO2max 属通用缩写，保持原样。
+- 技能版本写在 `SKILL.md` 的 `metadata.version`，与 `scripts/render.py` 的 `SKILL_VERSION` 必须一致（有测试守护）。HTML 页脚显示「由 oura skill vX.Y.Z 生成」，Markdown 标题下也有一行同样的溯源信息。
+
 ## Markdown 摘要
 
 与 HTML 同口径的核心数字表 + 末尾固定的解读区：
