@@ -14,6 +14,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from aggregate import SUMMARY_LABELS
 
+# Skill version, kept in sync with SKILL.md `metadata.version` (a test enforces
+# the two never drift). Reports print it so a saved file can be traced back to
+# the code that produced it.
+SKILL_VERSION = "1.0.0"
+
 # Dark dashboard palette.
 BG = "#0a0d14"
 PANEL = "#11151f"
@@ -111,6 +116,184 @@ def domain_label(key: str) -> str:
     return DOMAIN_LABELS.get(key, key)
 
 
+# Chinese labels for API *values* (status / level / type / colour / ...).
+# These are values, not keys: without a mapping the report shows raw API
+# vocabulary such as "bad_sleep_quality" or "stealth_black". Unknown values fall
+# back to the raw string, so a new API enum never crashes the render.
+STRESS_SUMMARY_LABELS = {
+    "restored": "已恢复",
+    "normal": "正常",
+    "stressful": "压力偏高",
+}
+
+RESILIENCE_LEVEL_LABELS = {
+    "limited": "有限",
+    "adequate": "尚可",
+    "solid": "稳健",
+    "strong": "强",
+    "exceptional": "极佳",
+}
+
+SLEEP_TIME_STATUS_LABELS = {
+    "optimal_found": "已找到最佳时段",
+    "only_recommended_found": "仅有推荐时段",
+    "bad_sleep_quality": "睡眠质量欠佳",
+    "not_enough_nights": "夜间数据不足",
+    "not_enough_recent_nights": "近期夜间数据不足",
+    # Values seen in older exports / fixtures.
+    "optimal": "最佳",
+    "ideal": "理想",
+    "improve": "建议改善",
+}
+
+WORKOUT_INTENSITY_LABELS = {
+    "easy": "轻松",
+    "moderate": "中等",
+    "hard": "高强度",
+}
+
+SESSION_TYPE_LABELS = {
+    "breathing": "呼吸练习",
+    "meditation": "冥想",
+    "nap": "小睡",
+    "relaxation": "放松",
+    "rest": "休息",
+    "body_status": "身体状态",
+}
+
+SESSION_MOOD_LABELS = {
+    "bad": "差",
+    "worse": "较差",
+    "same": "一般",
+    "good": "良好",
+    "great": "很好",
+}
+
+RING_DESIGN_LABELS = {
+    "heritage": "传承系列",
+    "horizon": "地平线系列",
+    "balance": "平衡系列",
+    "balance_diamond": "平衡钻石系列",
+    "ceramic": "陶瓷系列",
+}
+
+RING_COLOR_LABELS = {
+    "brushed_silver": "拉丝银",
+    "glossy_black": "亮黑",
+    "glossy_gold": "亮金",
+    "glossy_white": "亮白",
+    "gucci": "古驰联名",
+    "matt_gold": "哑光金",
+    "rose": "玫瑰金",
+    "silver": "银色",
+    "stealth_black": "隐形黑",
+    "titanium": "钛色",
+    "titanium_and_gold": "钛金双色",
+    "cloud": "云白",
+    "petal": "花瓣粉",
+    "midnight": "午夜蓝",
+    "tide": "潮汐蓝",
+    "black": "黑色",
+    "gold": "金色",
+    "rose_gold": "玫瑰金",
+}
+
+RING_HARDWARE_LABELS = {
+    "gen1": "第一代",
+    "gen2": "第二代",
+    "gen2m": "第二代 M",
+    "gen3": "第三代",
+    "gen4": "第四代",
+    "or5": "第五代",
+}
+
+# Oura's workout vocabulary is long and open-ended; map the common tags and let
+# anything else fall through to the raw name.
+WORKOUT_ACTIVITY_LABELS = {
+    "walking": "步行",
+    "running": "跑步",
+    "cycling": "骑行",
+    "swimming": "游泳",
+    "strength_training": "力量训练",
+    "traditional_strength_training": "传统力量训练",
+    "yoga": "瑜伽",
+    "pilates": "普拉提",
+    "stretching": "拉伸",
+    "flexibility": "柔韧训练",
+    "mobility": "灵活性训练",
+    "hiit": "高强度间歇训练",
+    "high_intensity_interval_training": "高强度间歇训练",
+    "crossfit": "综合体能",
+    "functional_training": "功能性训练",
+    "core_training": "核心训练",
+    "boxing": "拳击",
+    "kickboxing": "踢拳",
+    "martial_arts": "武术",
+    "tennis": "网球",
+    "table_tennis": "乒乓球",
+    "badminton": "羽毛球",
+    "squash": "壁球",
+    "golf": "高尔夫",
+    "basketball": "篮球",
+    "soccer": "足球",
+    "football": "橄榄球",
+    "baseball": "棒球",
+    "softball": "垒球",
+    "volleyball": "排球",
+    "cricket": "板球",
+    "hockey": "冰球",
+    "rowing": "划船",
+    "kayaking": "皮划艇",
+    "canoeing": "独木舟",
+    "paddleboarding": "桨板",
+    "sailing": "帆船",
+    "surfing": "冲浪",
+    "scuba_diving": "水肺潜水",
+    "snorkeling": "浮潜",
+    "water_polo": "水球",
+    "swimming_open_water": "公开水域游泳",
+    "skiing": "滑雪",
+    "snowboarding": "单板滑雪",
+    "cross_country_skiing": "越野滑雪",
+    "downhill_skiing": "高山滑雪",
+    "snowshoeing": "雪鞋行走",
+    "climbing": "攀岩",
+    "hiking": "徒步",
+    "dancing": "舞蹈",
+    "elliptical": "椭圆机",
+    "skating": "滑冰",
+    "skating_sports": "滑冰运动",
+    "horse_riding": "骑马",
+    "gymnastics": "体操",
+    "breathwork": "呼吸训练",
+    "meditation": "冥想",
+    "mind_and_body": "身心练习",
+    "massage": "按摩",
+    "physiotherapy": "理疗",
+    "sauna": "桑拿",
+    "housework": "家务",
+    "gardening": "园艺",
+    "fishing": "钓鱼",
+    "hunting": "狩猎",
+    "archery": "射箭",
+    "bowling": "保龄球",
+    "billiards": "台球",
+    "esports": "电子竞技",
+    "commute": "通勤",
+    "stroller_walking": "推车散步",
+    "wheelchair": "轮椅",
+    "workout": "锻炼",
+    "other": "其他",
+}
+
+
+def enum_label(mapping: Dict[str, str], value: object) -> object:
+    """Translate an API enum value; unknown/missing values pass through."""
+    if value is None:
+        return None
+    return mapping.get(str(value), value)
+
+
 def summary_value(key: str, value: object) -> str:
     """Format a summary number for display: durations are seconds internally."""
     if value is None:
@@ -118,6 +301,24 @@ def summary_value(key: str, value: object) -> str:
     if key in DURATION_SUMMARY_KEYS:
         return fmt_duration(value)
     return str(value)
+
+
+def delta_value(key: str, value: object) -> str:
+    """Signed comparison delta; duration keys stay in hours/minutes, not seconds."""
+    if value is None:
+        return "—"
+    if key in DURATION_SUMMARY_KEYS:
+        total_minutes = int(round(float(value) / 60.0))
+        sign = "+" if total_minutes > 0 else ("-" if total_minutes < 0 else "")
+        hours, minutes = divmod(abs(total_minutes), 60)
+        if hours and minutes:
+            text = "%d 小时 %d 分" % (hours, minutes)
+        elif hours:
+            text = "%d 小时" % hours
+        else:
+            text = "%d 分" % minutes
+        return "%s%s" % (sign, text)
+    return "%+.2f" % value
 
 
 def fmt_duration(seconds: object) -> str:
@@ -739,10 +940,10 @@ def _extended_panel(report: dict) -> str:
         _kv_item("呼吸紊乱指数", spo2.get("bdi")),
         _kv_item("高压力时长", fmt_duration(stress.get("stress_high"))),
         _kv_item("恢复时长", fmt_duration(stress.get("recovery_high"))),
-        _kv_item("当日压力总结", stress.get("day_summary")),
-        _kv_item("恢复力", resilience.get("level")),
+        _kv_item("当日压力总结", enum_label(STRESS_SUMMARY_LABELS, stress.get("day_summary"))),
+        _kv_item("恢复力", enum_label(RESILIENCE_LEVEL_LABELS, resilience.get("level"))),
         _kv_item("VO2max", vo2.get("vo2_max")),
-        _kv_item("就寝建议", sleep_time.get("status")),
+        _kv_item("就寝建议", enum_label(SLEEP_TIME_STATUS_LABELS, sleep_time.get("status"))),
         _kv_item("休息模式", ("%d 段" % len(rest)) if rest else None),
     ])
     return '<h2>扩展指标</h2><div class="panel"><div class="kv">%s</div></div>' % facts
@@ -786,7 +987,8 @@ def _events_panel(report: dict) -> str:
     workouts = events.get("workout") or []
     if workouts:
         from aggregate import _duration_between
-        rows = [[esc(w.get("label") or w.get("activity")), esc(w.get("intensity")),
+        rows = [[esc(w.get("label") or enum_label(WORKOUT_ACTIVITY_LABELS, w.get("activity"))),
+                 esc(enum_label(WORKOUT_INTENSITY_LABELS, w.get("intensity"))),
                  esc(w.get("calories")),
                  esc(fmt_duration(_duration_between(w.get("start_datetime"),
                                                     w.get("end_datetime"))))]
@@ -798,7 +1000,8 @@ def _events_panel(report: dict) -> str:
 
     sessions = events.get("session") or []
     if sessions:
-        rows = [[esc(s.get("type")), esc(s.get("mood"))] for s in sessions]
+        rows = [[esc(enum_label(SESSION_TYPE_LABELS, s.get("type"))),
+                 esc(enum_label(SESSION_MOOD_LABELS, s.get("mood")))] for s in sessions]
         body = _table(["类型", "心情"], rows, numeric_from=99)
     else:
         body = _na()
@@ -836,10 +1039,10 @@ def _device_panel(report: dict) -> str:
     facts = "".join([
         _kv_item("最低电量", battery.get("lowest"), "%"),
         _kv_item("采样次数", len(levels) if levels else None),
-        _kv_item("型号", device.get("design")),
-        _kv_item("颜色", device.get("color")),
+        _kv_item("型号", enum_label(RING_DESIGN_LABELS, device.get("design"))),
+        _kv_item("颜色", enum_label(RING_COLOR_LABELS, device.get("color"))),
         _kv_item("尺寸", device.get("size"), "号"),
-        _kv_item("硬件", device.get("hardware_type")),
+        _kv_item("硬件", enum_label(RING_HARDWARE_LABELS, device.get("hardware_type"))),
     ])
     return '<h2>设备</h2><div class="panel"><div class="kv">%s</div></div>' % facts
 
@@ -955,7 +1158,8 @@ def _period_sections(report: dict) -> str:
         parts.append('<h2>环比</h2><p class="note">%s</p>' % esc(comparison.get("note", "")))
         deltas = comparison.get("deltas") or {}
         if deltas:
-            rows = [[esc(render_label(key)), "%+.2f" % value] for key, value in deltas.items()]
+            rows = [[esc(render_label(key)), esc(delta_value(key, value))]
+                    for key, value in deltas.items()]
             parts.append('<div class="panel">%s</div>' % _table(["指标", "较上期"], rows))
         else:
             parts.append('<div class="panel">%s</div>' % _na("上期无可比数据"))
@@ -1010,7 +1214,9 @@ def render_html(report: dict) -> str:
         chips.append("体重 <b>%s</b> kg" % context["weight"])
     device = report.get("device") or {}
     if device.get("design"):
-        chips.append("Oura <b>%s</b> · %s 号" % (device.get("design"), device.get("size") or "—"))
+        chips.append("Oura <b>%s</b> · %s 号"
+                     % (esc(enum_label(RING_DESIGN_LABELS, device.get("design"))),
+                        esc(device.get("size") or "—")))
     if report.get("is_partial"):
         chips.append("周期未结束 · 已过 <b>%s</b> 天" % report.get("elapsed_days"))
     if report.get("missing_days"):
@@ -1048,8 +1254,8 @@ def render_html(report: dict) -> str:
 
     body.append('<div id="docs"></div>')
     body.append(_docs_panel())
-    body.append('<footer><span>由 oura skill 生成 · Oura Cloud API v2</span>'
-                '<span>个人数据，仅供参考，不构成医疗建议</span></footer>')
+    body.append('<footer><span>由 oura skill v%s 生成 · Oura Cloud API v2</span>'
+                '<span>个人数据，仅供参考，不构成医疗建议</span></footer>' % SKILL_VERSION)
     body.append("</div>")
 
     return ('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
@@ -1073,6 +1279,8 @@ def render_markdown(report: dict) -> str:
 
     scores = report.get("scores") or {}
     lines = ["# Oura %s：%s" % (title_period, span), ""]
+    lines.append("> 由 oura skill v%s 生成 · 数据来源 Oura Cloud API v2" % SKILL_VERSION)
+    lines.append("")
 
     if report.get("is_partial"):
         lines.append("> 周期未结束，已过 %s 天。" % report.get("elapsed_days"))
@@ -1131,7 +1339,7 @@ def render_markdown(report: dict) -> str:
         lines.append("> %s" % _md_cell(comparison.get("note")))
         lines.append("")
         for key, value in (comparison.get("deltas") or {}).items():
-            lines.append("- %s：%+.2f" % (_md_cell(render_label(key)), value))
+            lines.append("- %s：%s" % (_md_cell(render_label(key)), delta_value(key, value)))
         lines.append("")
 
     missing = report.get("missing_days") or []

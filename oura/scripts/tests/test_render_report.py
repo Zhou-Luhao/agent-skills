@@ -222,6 +222,98 @@ class ChineseLabelsTest(unittest.TestCase):
             self.assertNotIn(raw, html)
 
 
+class EnumValueLabelsTest(unittest.TestCase):
+    """API 原始枚举值（状态/等级/类型/颜色等）也要显示中文。"""
+
+    ZH_VALUES = (
+        "理想",        # sleep_time.status = ideal
+        "正常",        # daily_stress.day_summary = normal
+        "稳健",        # daily_resilience.level = solid
+        "冥想",        # session.type = meditation
+        "良好",        # session.mood = good
+        "中等",        # workout.intensity = moderate
+        "传承系列",    # ring_configuration.design = heritage
+        "银色",        # ring_configuration.color = silver
+        "第三代",      # ring_configuration.hardware_type = gen3
+    )
+    RAW_VALUES = ("ideal", "solid", "meditation", "running", "moderate",
+                  "heritage", "silver", "gen3")
+
+    def test_fixture_enum_values_render_chinese(self):
+        html = render.render_html(_daily())
+        for label in self.ZH_VALUES:
+            self.assertIn(label, html)
+
+    def test_fixture_raw_enum_values_absent(self):
+        # 只看值单元格：CSS 里本来就有 `1px solid`，裸子串匹配会误报。
+        html = render.render_html(_daily())
+        for raw in self.RAW_VALUES:
+            self.assertNotIn(">%s<" % raw, html)
+
+    def test_workout_activity_used_when_label_missing(self):
+        import copy
+        docs = copy.deepcopy(FIX)
+        docs["workout"][0]["label"] = None
+        html = render.render_html(aggregate.build_daily(docs, D(2026, 11, 10)))
+        self.assertIn("跑步", html)
+        self.assertNotIn(">running<", html)
+
+    def test_ring5_hardware_renders_chinese(self):
+        import copy
+        docs = copy.deepcopy(FIX)
+        docs["ring_configuration"][0]["hardware_type"] = "or5"
+        html = render.render_html(aggregate.build_daily(docs, D(2026, 11, 10)))
+        self.assertIn("第五代", html)
+        self.assertNotIn(">or5<", html)
+
+    def test_unknown_enum_value_falls_back_to_raw(self):
+        import copy
+        docs = copy.deepcopy(FIX)
+        docs["daily_resilience"][0]["level"] = "mystery_level"
+        html = render.render_html(aggregate.build_daily(docs, D(2026, 11, 10)))
+        self.assertIn("mystery_level", html)
+
+
+class ComparisonDeltaTest(unittest.TestCase):
+    """环比里的时长差必须以「小时/分」呈现，不能把秒数当小数打印。"""
+
+    def _weekly_with_delta(self):
+        report = _weekly()
+        report["comparison"] = {
+            "note": "本期截至 2026-11-21（6 天），与上期同天数对比",
+            "deltas": {"sleep_duration_avg": -1852.0, "sleep_score": -1.17},
+        }
+        return report
+
+    def test_markdown_formats_duration_delta(self):
+        md = render.render_markdown(self._weekly_with_delta())
+        self.assertIn("-31 分", md)
+        self.assertNotIn("-1852.00", md)
+        self.assertIn("-1.17", md)
+
+    def test_html_formats_duration_delta(self):
+        html = render.render_html(self._weekly_with_delta())
+        self.assertIn("-31 分", html)
+        self.assertNotIn("-1852.00", html)
+
+
+class SkillVersionTest(unittest.TestCase):
+    """技能版本号：代码常量、SKILL.md 元数据、报告产物三处一致。"""
+
+    def test_html_footer_shows_version(self):
+        html = render.render_html(_daily())
+        self.assertIn("oura skill v%s" % render.SKILL_VERSION, html)
+
+    def test_markdown_shows_version(self):
+        md = render.render_markdown(_daily())
+        self.assertIn("v%s" % render.SKILL_VERSION, md)
+
+    def test_skill_md_metadata_matches_code(self):
+        path = pathlib.Path(__file__).resolve().parents[2] / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn('version: "%s"' % render.SKILL_VERSION, text)
+
+
 class CredentialScanTest(unittest.TestCase):
     """M12: 规格要求「全产物」不得含凭据。"""
 
